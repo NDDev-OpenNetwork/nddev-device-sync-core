@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "nddev-device-sync-adapters-keyring"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "keyring",
  "nddev-device-sync-application",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "nddev-device-sync-adapters-memory"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "nddev-device-sync-application",
  "nddev-device-sync-domain",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "nddev-device-sync-application"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "nddev-device-sync-domain",
  "thiserror",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "nddev-device-sync-domain"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "thiserror",

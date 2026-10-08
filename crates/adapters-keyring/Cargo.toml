@@ -1,6 +1,6 @@
 [package]
 name = "nddev-device-sync-adapters-keyring"
-version = "0.1.0"
+version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -8,4 +8,3 @@ license.workspace = true
 [dependencies]
 nddev-device-sync-application.workspace = true
 keyring = "4.2"
-
