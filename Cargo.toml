@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/application",
+    "crates/adapters-memory",
+    "crates/adapters-keyring",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+license = "AGPL-3.0-only"
+authors = ["NDDev OpenNetwork"]
+
+[workspace.dependencies]
+nddev-device-sync-domain = { path = "crates/domain", version = "0.1.0" }
+nddev-device-sync-application = { path = "crates/application", version = "0.1.0" }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+keyring = "4.2"
