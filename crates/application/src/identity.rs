@@ -478,9 +478,14 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
         if !valid_opaque(token) {
             return Err(IdentityError::Denied);
         }
-        self.store
+        let session = self
+            .store
             .session(self.crypto.protect("session", &[token.as_bytes()]), now)
-            .await
+            .await?;
+        if session.owner != self.owner || !session.active(now) {
+            return Err(IdentityError::Denied);
+        }
+        Ok(session)
     }
     pub async fn revoke(&self, token: &str, now: u64) -> Result<(), IdentityError> {
         if !valid_opaque(token) {
