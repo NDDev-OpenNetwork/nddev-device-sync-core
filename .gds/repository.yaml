@@ -1,0 +1,48 @@
+schema_version: 1
+repository:
+  id: "repo_01M4HDNR3TRQR3J5HSAB92M0X9"
+  display_name: "nddev-device-sync-core"
+  roles:
+    - "project"
+  lifecycle: "active"
+provider:
+  type: "github"
+  installation: "installation:github-opennetwork"
+  repository_id: 1411022673
+  owner: "NDDev-OpenNetwork"
+  name: "nddev-device-sync-core"
+classification:
+  portfolios:
+    - "portfolio:nddev-opennetwork"
+  visibility_contract: "public"
+  data_classification: "public"
+product:
+  purpose: "Public AGPL-3.0-only Rust core for NDDev OpenNetwork device sync products: domain rules, application ports, deterministic test adapters and credential-store integration."
+  capabilities:
+    - "Pure domain rules and application ports for device sync"
+    - "Deterministic test adapters and native credential-store integration"
+  entrypoints:
+    - change: "module identity and version"
+      path: "module.yaml"
+    - change: "what this repository is and may do"
+      path: "README.md"
+policy:
+  profiles:
+    - "repository-default"
+    - "opennetwork-default"
+  rollout_ring: "standard"
+git:
+  default_branch: "main"
+  integration: "pull-request"
+  branch_model: "task-branches"
+  handoff_pr: "preferred"
+  cleanup: "merged-only"
+agent:
+  context_profile: "project-default"
+  generated_agents: false
+  serena:
+    enabled: true
+    provenance_required: true
+release:
+  mode: "version-tag"
+  tag_style: "v-semver"
