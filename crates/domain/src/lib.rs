@@ -8,16 +8,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
 macro_rules! id_type {
     ($name:ident) => {
-        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
 
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
                 let value = value.into();
-                if value.trim().is_empty() || value.len() > 128 {
+                if !valid_identifier(&value) {
                     return Err(DomainError::InvalidIdentifier);
                 }
                 Ok(Self(value))
@@ -25,6 +33,12 @@ macro_rules! id_type {
 
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
             }
         }
 
@@ -119,7 +133,7 @@ impl ModuleDescriptor {
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum DomainError {
-    #[error("identifier is empty or too long")]
+    #[error("identifier must be 1..128 ASCII letters, digits, '.', '_', ':', or '-'")]
     InvalidIdentifier,
     #[error("module descriptor is invalid")]
     InvalidModuleDescriptor,
@@ -282,6 +296,44 @@ impl AccountRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifier_deserialization_enforces_the_constructor_contract() {
+        use serde::de::value::{Error, StrDeserializer};
+
+        for value in [
+            "",
+            " ",
+            "a/b",
+            "a b",
+            " a",
+            "a\n",
+            "\0",
+            "é",
+            &"a".repeat(129),
+        ] {
+            assert!(ModuleId::new(value).is_err());
+            assert!(HarnessId::new(value).is_err());
+            assert!(AccountId::new(value).is_err());
+            assert!(ModuleId::deserialize(StrDeserializer::<Error>::new(value)).is_err());
+            assert!(HarnessId::deserialize(StrDeserializer::<Error>::new(value)).is_err());
+            assert!(AccountId::deserialize(StrDeserializer::<Error>::new(value)).is_err());
+        }
+        for value in ["a", "AZ09-_.:", &"a".repeat(128)] {
+            assert_eq!(
+                ModuleId::deserialize(StrDeserializer::<Error>::new(value)).unwrap(),
+                ModuleId::new(value).unwrap()
+            );
+            assert_eq!(
+                HarnessId::deserialize(StrDeserializer::<Error>::new(value)).unwrap(),
+                HarnessId::new(value).unwrap()
+            );
+            assert_eq!(
+                AccountId::deserialize(StrDeserializer::<Error>::new(value)).unwrap(),
+                AccountId::new(value).unwrap()
+            );
+        }
+    }
 
     fn descriptor(id: &str, dependencies: Vec<ModuleDependency>) -> ModuleDescriptor {
         ModuleDescriptor {

@@ -7,4 +7,8 @@ license.workspace = true
 
 [dependencies]
 nddev-device-sync-application.workspace = true
-keyring = "4.2"
+keyring.workspace = true
+
+[dev-dependencies]
+nddev-device-sync-domain.workspace = true
+nddev-device-sync-adapters-memory = { path = "../adapters-memory" }
