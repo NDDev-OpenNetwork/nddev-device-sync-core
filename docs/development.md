@@ -16,11 +16,13 @@ central standards.
 
 ## Standards compatibility
 
-The module standards lock remains at `v0.0.1-alpha.7` (`592531d`).
-Central `v0.0.1-alpha.8` (`c73a525`) changes assembly catalog metadata only;
-the normative `standarts/` files are identical. The older lock is compatible
-with the current assembly. Update locks only through the canonical source
-release, not through a mutable branch.
+The identity slice adopts `v0.0.1-alpha.9`
+(`16a477beac6127adf73ef102df74a48451d607f1`). ADR 0003 introduces email OTP
+and GitHub PKCE as explicit sign-in bindings for one owner. Product identity
+use cases are consumed through the paired server change; harness accounts
+retain their separate credential-store boundary. The server pins an immutable
+core source while paired adapter acceptance is reviewed. No new core release
+or cross-platform acceptance is implied by that development pin.
 
 ## Account safety compatibility
 
