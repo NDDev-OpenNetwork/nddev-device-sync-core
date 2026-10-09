@@ -14,3 +14,5 @@ clippy:
 
 check: fmt-check test clippy
 
+keyring-check:
+    python3 scripts/check-keyring.py
