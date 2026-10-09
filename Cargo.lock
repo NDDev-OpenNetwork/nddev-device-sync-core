@@ -608,7 +608,9 @@ name = "nddev-device-sync-adapters-keyring"
 version = "0.0.1"
 dependencies = [
  "keyring",
+ "nddev-device-sync-adapters-memory",
  "nddev-device-sync-application",
+ "nddev-device-sync-domain",
 ]
 
 [[package]]

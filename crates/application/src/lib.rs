@@ -22,10 +22,18 @@ pub enum ApplicationError {
     Harness(String),
     #[error("account does not exist")]
     UnknownAccount,
+    #[error("account is not authorized")]
+    AccountNotAuthorized,
+    #[error("secret write failed and pending account cleanup failed")]
+    AccountCleanupFailed,
 }
 
+/// Mutations are atomic: an error leaves the existing records unchanged.
 pub trait AccountStore {
+    /// Reserve an ID; duplicates must fail without replacing the existing record.
     fn insert(&mut self, record: AccountRecord) -> Result<(), String>;
+    /// Complete only a pending authorization after its secret has been persisted.
+    fn mark_authorized(&mut self, id: &AccountId) -> Result<(), String>;
     fn remove(&mut self, id: &AccountId) -> Result<(), String>;
     fn get(&self, id: &AccountId) -> Result<Option<AccountRecord>, String>;
     fn list(&self, harness_id: &HarnessId) -> Result<Vec<AccountRecord>, String>;
@@ -80,14 +88,21 @@ where
     ) -> Result<AccountId, ApplicationError> {
         let id = record.id.clone();
         let key = secret_key(&record.harness_id, &record.id);
-        self.secrets
-            .put(ACCOUNT_SECRET_SERVICE, &key, secret)
-            .map_err(ApplicationError::SecretStore)?;
-        record.status = AccountStatus::Authorized;
-        if let Err(error) = self.accounts.insert(record) {
-            let _ = self.secrets.delete(ACCOUNT_SECRET_SERVICE, &key);
-            return Err(ApplicationError::AccountStore(error));
+        record.status = AccountStatus::PendingAuthorization;
+        self.accounts
+            .insert(record)
+            .map_err(ApplicationError::AccountStore)?;
+        if let Err(error) = self.secrets.put(ACCOUNT_SECRET_SERVICE, &key, secret) {
+            self.accounts
+                .remove(&id)
+                .map_err(|_| ApplicationError::AccountCleanupFailed)?;
+            return Err(ApplicationError::SecretStore(error));
         }
+        // A failed finalization leaves a pending record, never a usable account.
+        // Do not delete a secret after an uncertain write or metadata failure.
+        self.accounts
+            .mark_authorized(&id)
+            .map_err(ApplicationError::AccountStore)?;
         Ok(id)
     }
 
@@ -108,6 +123,12 @@ where
         if record.harness_id != *port.harness_id() {
             return Err(ApplicationError::Domain(DomainError::WrongHarness));
         }
+        if !matches!(
+            record.status,
+            AccountStatus::Authorized | AccountStatus::Active | AccountStatus::Inactive
+        ) {
+            return Err(ApplicationError::AccountNotAuthorized);
+        }
         let key = secret_key(&record.harness_id, &record.id);
         let secret = self
             .secrets
@@ -122,6 +143,8 @@ where
 }
 
 fn secret_key(harness_id: &HarnessId, account_id: &AccountId) -> String {
+    // IDs exclude '/', so this existing native key format is unambiguous.
+    // Keep it unchanged: no credential rename, fallback lookup or copying.
     format!("{}/{}", harness_id.as_str(), account_id.as_str())
 }
 
@@ -184,117 +207,14 @@ pub fn builtin_graph() -> Result<ModuleGraph, DomainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nddev_device_sync_domain::SwitchSupport;
-    use std::collections::BTreeMap;
-
-    #[derive(Default)]
-    struct Accounts(BTreeMap<AccountId, AccountRecord>);
-    impl AccountStore for Accounts {
-        fn insert(&mut self, record: AccountRecord) -> Result<(), String> {
-            if self.0.insert(record.id.clone(), record).is_some() {
-                Err("duplicate".into())
-            } else {
-                Ok(())
-            }
-        }
-        fn remove(&mut self, id: &AccountId) -> Result<(), String> {
-            self.0.remove(id);
-            Ok(())
-        }
-        fn get(&self, id: &AccountId) -> Result<Option<AccountRecord>, String> {
-            Ok(self.0.get(id).cloned())
-        }
-        fn list(&self, harness_id: &HarnessId) -> Result<Vec<AccountRecord>, String> {
-            Ok(self
-                .0
-                .values()
-                .filter(|record| &record.harness_id == harness_id)
-                .cloned()
-                .collect())
-        }
-        fn mark_active(
-            &mut self,
-            harness_id: &HarnessId,
-            id: &AccountId,
-            now_ms: u64,
-        ) -> Result<(), String> {
-            for record in self
-                .0
-                .values_mut()
-                .filter(|record| &record.harness_id == harness_id)
-            {
-                record.status = if &record.id == id {
-                    AccountStatus::Active
-                } else {
-                    AccountStatus::Inactive
-                };
-                if &record.id == id {
-                    record.last_used_at_ms = Some(now_ms);
-                }
-            }
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct Secrets(BTreeMap<String, Vec<u8>>);
-    impl SecretStore for Secrets {
-        fn put(&mut self, service: &str, key: &str, secret: &[u8]) -> Result<(), String> {
-            self.0.insert(format!("{service}/{key}"), secret.to_vec());
-            Ok(())
-        }
-        fn get(&self, service: &str, key: &str) -> Result<Vec<u8>, String> {
-            self.0
-                .get(&format!("{service}/{key}"))
-                .cloned()
-                .ok_or_else(|| "missing".into())
-        }
-        fn delete(&mut self, service: &str, key: &str) -> Result<(), String> {
-            self.0.remove(&format!("{service}/{key}"));
-            Ok(())
-        }
-    }
-
-    struct Harness {
-        id: HarnessId,
-        activated: std::cell::Cell<bool>,
-    }
-    impl HarnessAccountPort for Harness {
-        fn harness_id(&self) -> &HarnessId {
-            &self.id
-        }
-        fn switch_support(&self) -> SwitchSupport {
-            SwitchSupport::Official
-        }
-        fn activate(&self, _: &AccountRecord, secret: &[u8]) -> Result<(), String> {
-            self.activated.set(secret == b"secret");
-            Ok(())
-        }
-    }
 
     #[test]
-    fn accounts_keep_secret_out_of_record_and_switch_atomically_in_memory() {
-        let harness_id = HarnessId::new("codex").unwrap();
-        let account_id = AccountId::new("personal").unwrap();
-        let record = AccountRecord::new(
-            account_id.clone(),
-            harness_id.clone(),
-            "Personal",
-            Some("user".into()),
-            1,
-            SwitchSupport::Official,
-        );
-        let mut service = AccountService::new(Accounts::default(), Secrets::default());
-        service.add_authorized(record, b"secret").unwrap();
-        let port = Harness {
-            id: harness_id.clone(),
-            activated: std::cell::Cell::new(false),
-        };
-        service.activate(&account_id, 2, &port).unwrap();
-        assert!(port.activated.get());
-        let (accounts, secrets) = service.into_parts();
-        assert_eq!(accounts.0[&account_id].status, AccountStatus::Active);
-        assert!(secrets.0.values().any(|secret| secret == b"secret"));
+    fn native_key_names_preserve_existing_valid_identifiers() {
+        let harness = HarnessId::new("codex").unwrap();
+        let account = AccountId::new("personal").unwrap();
+        assert_eq!(secret_key(&harness, &account), "codex/personal");
+        assert!(HarnessId::new("a/b").is_err());
+        assert!(AccountId::new("b/c").is_err());
     }
 
     #[test]
