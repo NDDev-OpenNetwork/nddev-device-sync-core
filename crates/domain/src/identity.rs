@@ -14,6 +14,13 @@ pub const MAX_PENDING_EMAIL: usize = 1024;
 pub const MAX_PENDING_GITHUB: usize = 128;
 pub const MAX_RATE_KEYS: usize = 4096;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Locale {
+    #[default]
+    En,
+    Ru,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum IdentityError {
     #[error("invalid_identity_input")]
@@ -236,6 +243,7 @@ pub struct GithubFlow {
     pub state: ProtectedDigest,
     pub exchange: ProtectedDigest,
     pub expires_at_ms: u64,
+    pub locale: Locale,
     verifier: Option<SecretText>,
     verification_code: SecretText,
     approval: Option<BrowserProof>,
@@ -249,6 +257,7 @@ impl GithubFlow {
         exchange: ProtectedDigest,
         verifier: SecretText,
         verification_code: SecretText,
+        locale: Locale,
         now: u64,
     ) -> Result<Self, IdentityError> {
         Ok(Self {
@@ -260,6 +269,7 @@ impl GithubFlow {
                 .ok_or(IdentityError::InvalidInput)?,
             verifier: Some(verifier),
             verification_code,
+            locale,
             approval: None,
             stage: GithubStage::Pending,
             next_poll_at_ms: now,
@@ -380,6 +390,7 @@ mod tests {
             ProtectedDigest([2; 32]),
             SecretText::new("ephemeral".into()),
             SecretText::new("12345678".into()),
+            Locale::En,
             100,
         )
         .unwrap();
@@ -415,6 +426,7 @@ mod tests {
                 ProtectedDigest([2; 32]),
                 SecretText::new("ephemeral".into()),
                 SecretText::new("12345678".into()),
+                Locale::En,
                 100,
             )
             .unwrap();

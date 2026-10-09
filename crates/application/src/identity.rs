@@ -31,6 +31,7 @@ pub struct EmailMessage {
     pub recipient: EmailAddress,
     pub code: SecretText,
     pub expires_at_ms: u64,
+    pub locale: Locale,
 }
 pub struct GithubStart {
     pub flow_id: String,
@@ -41,12 +42,17 @@ pub struct GithubStart {
 pub struct ApprovalDisplay {
     pub verification_code: String,
     pub expires_at_ms: u64,
+    pub locale: Locale,
 }
 pub struct BrowserApproval {
     pub flow_id: String,
     pub display: ApprovalDisplay,
     pub cookie: SecretText,
     pub csrf: SecretText,
+}
+pub enum GithubCallback {
+    Approval(BrowserApproval),
+    Complete(Locale),
 }
 pub enum GithubExchange {
     Pending,
@@ -147,7 +153,7 @@ pub trait GithubFlowStore: Send + Sync {
         id: &str,
         proof: Option<BrowserProof>,
         now: u64,
-    ) -> Result<Option<ApprovalDisplay>, IdentityError>;
+    ) -> Result<ApprovalDisplay, IdentityError>;
     /// Both digests are compared in constant time. Approval is one-use and
     /// browser-bound; a successful provider callback alone never grants a session.
     fn approve(
@@ -156,7 +162,7 @@ pub trait GithubFlowStore: Send + Sync {
         proof: BrowserProof,
         permit: bool,
         now: u64,
-    ) -> Result<(), IdentityError>;
+    ) -> Result<Locale, IdentityError>;
     /// Constant-time exchange verifier check and the GithubFlow::poll transition
     /// are atomic. Approved is returned at most once, before session persistence.
     fn poll(
@@ -229,6 +235,7 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
         &self,
         address: &str,
         source: &[u8],
+        locale: Locale,
         now: u64,
     ) -> Result<EmailReceipt, IdentityError> {
         if !self.email.available() {
@@ -259,6 +266,7 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
                     recipient: self.owner_email.clone(),
                     code,
                     expires_at_ms: challenge.expires_at_ms,
+                    locale,
                 })
                 .is_err()
         {
@@ -303,6 +311,7 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
     pub async fn start_github(
         &self,
         source: &[u8],
+        locale: Locale,
         now: u64,
     ) -> Result<GithubStart, IdentityError> {
         if !self.methods().1 {
@@ -328,6 +337,7 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
                 .protect("github_exchange", &[exchange.expose().as_bytes()]),
             verifier,
             verification_code,
+            locale,
             now,
         )?;
         self.flows.insert(flow, now)?;
@@ -345,7 +355,7 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
         code: Option<&str>,
         source: &[u8],
         now: u64,
-    ) -> Result<Option<BrowserApproval>, IdentityError> {
+    ) -> Result<GithubCallback, IdentityError> {
         if !valid_opaque(state)
             || code.is_some_and(|code| {
                 code.is_empty()
@@ -375,10 +385,10 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
             .as_ref()
             .is_ok_and(|id| Some(*id) == self.owner_github_id);
         if !permitted {
-            self.flows.complete_callback(&id, None, now)?;
+            let display = self.flows.complete_callback(&id, None, now)?;
             return match result {
                 Err(IdentityError::Unavailable) => Err(IdentityError::Unavailable),
-                _ => Ok(None),
+                _ => Ok(GithubCallback::Complete(display.locale)),
             };
         }
         let (cookie, csrf) = match (self.crypto.token(), self.crypto.token()) {
@@ -397,11 +407,8 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
                 .crypto
                 .protect("github_csrf", &[id.as_bytes(), csrf.expose().as_bytes()]),
         };
-        let display = self
-            .flows
-            .complete_callback(&id, Some(proof), now)?
-            .ok_or(IdentityError::Denied)?;
-        Ok(Some(BrowserApproval {
+        let display = self.flows.complete_callback(&id, Some(proof), now)?;
+        Ok(GithubCallback::Approval(BrowserApproval {
             flow_id: id,
             display,
             cookie,
@@ -417,7 +424,7 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
         permit: bool,
         source: &[u8],
         now: u64,
-    ) -> Result<(), IdentityError> {
+    ) -> Result<Locale, IdentityError> {
         if !valid_opaque(id) || !valid_opaque(cookie) || !valid_opaque(csrf) {
             return Err(IdentityError::Denied);
         }
