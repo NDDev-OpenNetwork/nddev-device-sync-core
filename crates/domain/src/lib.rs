@@ -53,6 +53,10 @@ macro_rules! id_type {
 id_type!(ModuleId);
 id_type!(HarnessId);
 id_type!(AccountId);
+id_type!(UserId);
+id_type!(TenantId);
+
+pub mod identity;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
