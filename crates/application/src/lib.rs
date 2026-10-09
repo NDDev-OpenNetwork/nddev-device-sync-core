@@ -1,6 +1,7 @@
 //! Use cases and ports. Adapters implement these traits; the application core
 //! never reaches into an OS API, a harness config file, or a credential store.
 
+pub mod devices;
 pub mod identity;
 
 use nddev_device_sync_domain::{
