@@ -51,8 +51,6 @@ macro_rules! id_type {
 }
 
 id_type!(ModuleId);
-id_type!(HarnessId);
-id_type!(AccountId);
 id_type!(UserId);
 id_type!(TenantId);
 id_type!(DeviceId);
@@ -151,10 +149,6 @@ pub enum DomainError {
     DependencyCycle,
     #[error("module is not registered")]
     UnknownModule,
-    #[error("account belongs to another harness")]
-    WrongHarness,
-    #[error("official account switching is not supported by this harness")]
-    SwitchingNotSupported,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -240,65 +234,6 @@ impl ModuleGraph {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccountStatus {
-    PendingAuthorization,
-    Authorized,
-    Active,
-    Inactive,
-    Revoked,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SwitchSupport {
-    Official,
-    Unsupported,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HarnessDescriptor {
-    pub id: HarnessId,
-    pub display_name: String,
-    pub switch_support: SwitchSupport,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AccountRecord {
-    pub id: AccountId,
-    pub harness_id: HarnessId,
-    pub label: String,
-    pub username_hint: Option<String>,
-    pub status: AccountStatus,
-    pub switch_support: SwitchSupport,
-    pub created_at_ms: u64,
-    pub last_used_at_ms: Option<u64>,
-}
-
-impl AccountRecord {
-    pub fn new(
-        id: AccountId,
-        harness_id: HarnessId,
-        label: impl Into<String>,
-        username_hint: Option<String>,
-        now_ms: u64,
-        switch_support: SwitchSupport,
-    ) -> Self {
-        Self {
-            id,
-            harness_id,
-            label: label.into(),
-            username_hint,
-            status: AccountStatus::Authorized,
-            switch_support,
-            created_at_ms: now_ms,
-            last_used_at_ms: None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,24 +254,12 @@ mod tests {
             &"a".repeat(129),
         ] {
             assert!(ModuleId::new(value).is_err());
-            assert!(HarnessId::new(value).is_err());
-            assert!(AccountId::new(value).is_err());
             assert!(ModuleId::deserialize(StrDeserializer::<Error>::new(value)).is_err());
-            assert!(HarnessId::deserialize(StrDeserializer::<Error>::new(value)).is_err());
-            assert!(AccountId::deserialize(StrDeserializer::<Error>::new(value)).is_err());
         }
         for value in ["a", "AZ09-_.:", &"a".repeat(128)] {
             assert_eq!(
                 ModuleId::deserialize(StrDeserializer::<Error>::new(value)).unwrap(),
                 ModuleId::new(value).unwrap()
-            );
-            assert_eq!(
-                HarnessId::deserialize(StrDeserializer::<Error>::new(value)).unwrap(),
-                HarnessId::new(value).unwrap()
-            );
-            assert_eq!(
-                AccountId::deserialize(StrDeserializer::<Error>::new(value)).unwrap(),
-                AccountId::new(value).unwrap()
             );
         }
     }
