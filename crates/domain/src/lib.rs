@@ -57,6 +57,7 @@ id_type!(DeviceId);
 
 pub mod devices;
 pub mod identity;
+pub mod state;
 pub mod sync;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
