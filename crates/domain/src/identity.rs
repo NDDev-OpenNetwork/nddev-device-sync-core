@@ -122,6 +122,14 @@ pub struct Session {
     pub method: AuthMethod,
     pub expires_at_ms: u64,
 }
+
+/// A verified session and its protected storage binding. This is not a wire
+/// credential; mutation stores revalidate the binding under their transaction.
+#[derive(Clone)]
+pub struct AuthenticatedSession {
+    pub session: Session,
+    pub binding: ProtectedDigest,
+}
 impl Session {
     pub fn new(owner: Owner, method: AuthMethod, now: u64) -> Result<Self, IdentityError> {
         Ok(Self {
