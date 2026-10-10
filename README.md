@@ -12,8 +12,11 @@ no knowledge of the private self-hosted estate.
 ## Verification
 
 ```sh
-cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+just check
+just keyring-check
 ```
 
+`just check` requires cargo-nextest 0.9.148, cargo-audit 0.22.2 and cargo-deny
+0.20.2, pinned in CI. It checks formatting, locked workspace tests and doctests,
+Clippy, known dependency advisories and the reviewed license/source policy.
+Native Linux credential-store acceptance uses only an isolated Secret Service.
