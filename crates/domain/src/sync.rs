@@ -114,6 +114,8 @@ pub enum SyncError {
     Nonce,
     #[error("idempotency_conflict")]
     Idempotency,
+    #[error("operation_conflict")]
+    KeyConflict,
     #[error("revision_exhausted")]
     Revision,
     #[error("server_busy")]
