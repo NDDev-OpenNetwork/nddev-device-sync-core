@@ -19,29 +19,14 @@ central standards.
 The identity slice adopts `v0.0.1-alpha.9`
 (`16a477beac6127adf73ef102df74a48451d607f1`). ADR 0003 introduces email OTP
 and GitHub PKCE as explicit sign-in bindings for one owner. Product identity
-use cases are consumed through the paired server change; harness accounts
-retain their separate credential-store boundary. The server pins an immutable
-core source while paired adapter acceptance is reviewed. No new core release
-or cross-platform acceptance is implied by that development pin.
+use cases are consumed by the server through an immutable core source pin.
 
-## Account safety compatibility
+## API boundary
 
-`ModuleId`, `HarnessId` and `AccountId` accept 1..128 ASCII letters, digits,
-`.`, `_`, `:` and `-`, identically in constructors and deserialization.
-Native account entries keep the existing service and `harness/account` key.
-Previously accepted malformed IDs fail validation; their credentials are not
-renamed, copied, deleted or looked up through an ambiguous fallback. Such records
-need an explicitly reviewed transition before they can be used again.
-
-`AccountStore::insert` atomically reserves an ID in `PendingAuthorization`;
-duplicates must leave the existing record unchanged. `mark_authorized` completes
-that state only after the secret write. A failed cleanup is explicit and leaves
-an unusable pending record; a failed finalization preserves the secret and pending
-record. These failures require reconciliation, not automatic credential deletion.
-
-`just keyring-check` exercises the real Linux Secret Service adapter on a separate
-D-Bus session with disposable encrypted keyring storage. It does not use the
-desktop keyring. It requires `dbus-run-session`, `gnome-keyring-daemon` and `gdbus`.
-Ordinary tests cover rules and deterministic in-memory behavior; fault-injection
-unit tests are not native adapter acceptance. Other platforms require their own
-native acceptance before claiming support.
+Core candidate `0.0.1-alpha.9` removes the unconsumed harness account service,
+its account models and memory/keyring adapters. The domain package changes from
+`0.0.1` to `0.0.2`; application changes to `0.0.1-alpha.9`. Consumers update an
+explicit Git revision. Active identity/enrollment rules and module descriptors
+retain their contracts; published protocol schemas and old Git tags are unchanged.
+Product session storage and its native acceptance remain in the accounts module.
+Removing this source does not read, rename or delete existing credential entries.

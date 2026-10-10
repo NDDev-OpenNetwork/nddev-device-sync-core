@@ -32,11 +32,5 @@ jobs:
           cargo install --locked --version 0.9.148 cargo-nextest
           cargo install --locked --version 0.22.2 cargo-audit
           cargo install --locked --version 0.20.2 cargo-deny
-      - name: Install isolated native keyring acceptance dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y dbus-daemon gnome-keyring libglib2.0-bin
       - name: Check formatting, tests, Clippy and dependency policy
         run: just check
-      - name: Check the native Linux credential-store adapter
-        run: just keyring-check
