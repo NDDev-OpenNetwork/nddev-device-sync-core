@@ -9,6 +9,10 @@ The desktop, mobile, server and agent repositories consume this core through
 pinned releases and the protocol repository. The core has no UI dependency and
 no knowledge of the private self-hosted estate.
 
+Module descriptors belong to their implementing adapters. The native agent
+composes their manifests through the domain graph; core contains no parallel
+assembly registry or claims about installed provider capabilities.
+
 ## Verification
 
 ```sh

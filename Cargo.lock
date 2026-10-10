@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "nddev-device-sync-application"
-version = "0.0.1"
+version = "0.0.1-alpha.8"
 dependencies = [
  "nddev-device-sync-domain",
  "thiserror",
