@@ -5,10 +5,8 @@ pub mod devices;
 pub mod identity;
 
 use nddev_device_sync_domain::{
-    AccountId, AccountRecord, AccountStatus, DomainError, HarnessId, ModuleCapability,
-    ModuleDescriptor, ModuleGraph, ModuleId, ModuleKind, Permission, Platform, SwitchSupport,
+    AccountId, AccountRecord, AccountStatus, DomainError, HarnessId, SwitchSupport,
 };
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 pub const ACCOUNT_SECRET_SERVICE: &str = "com.nddev.device-sync.account";
@@ -151,62 +149,6 @@ fn secret_key(harness_id: &HarnessId, account_id: &AccountId) -> String {
     format!("{}/{}", harness_id.as_str(), account_id.as_str())
 }
 
-pub fn builtin_modules() -> Vec<ModuleDescriptor> {
-    [
-        ("gds", ModuleKind::Gds, [ModuleCapability::ReadModuleHealth]),
-        ("rds", ModuleKind::Rds, [ModuleCapability::ReadModuleHealth]),
-        (
-            "sysinfo",
-            ModuleKind::Tool,
-            [ModuleCapability::ReadDeviceState],
-        ),
-        (
-            "clipboard",
-            ModuleKind::Tool,
-            [ModuleCapability::RunExistingTool],
-        ),
-        (
-            "cleaner",
-            ModuleKind::Tool,
-            [ModuleCapability::RunExistingTool],
-        ),
-        (
-            "updater",
-            ModuleKind::Tool,
-            [ModuleCapability::ApplyUpdates],
-        ),
-        (
-            "accounts",
-            ModuleKind::Accounts,
-            [ModuleCapability::ManageHarnessAccounts],
-        ),
-    ]
-    .into_iter()
-    .map(|(id, kind, capabilities)| ModuleDescriptor {
-        id: ModuleId::new(id).expect("static module id"),
-        version: "0.1.0".into(),
-        api_version: 1,
-        kind,
-        platforms: Platform::ALL.into_iter().collect(),
-        capabilities: capabilities.into_iter().collect(),
-        permissions: if kind == ModuleKind::Accounts {
-            BTreeSet::from([Permission::CredentialStore, Permission::ReadOnly])
-        } else {
-            BTreeSet::from([Permission::ReadOnly])
-        },
-        dependencies: Vec::new(),
-    })
-    .collect()
-}
-
-pub fn builtin_graph() -> Result<ModuleGraph, DomainError> {
-    let mut graph = ModuleGraph::default();
-    for module in builtin_modules() {
-        graph.register(module)?;
-    }
-    Ok(graph)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,12 +160,5 @@ mod tests {
         assert_eq!(secret_key(&harness, &account), "codex/personal");
         assert!(HarnessId::new("a/b").is_err());
         assert!(AccountId::new("b/c").is_err());
-    }
-
-    #[test]
-    fn builtin_graph_is_platform_neutral() {
-        let graph = builtin_graph().unwrap();
-        assert_eq!(graph.iter().count(), 7);
-        assert_eq!(graph.activation_order().unwrap().len(), 7);
     }
 }

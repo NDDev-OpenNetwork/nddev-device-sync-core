@@ -15,7 +15,7 @@ authors = ["NDDev OpenNetwork"]
 
 [workspace.dependencies]
 nddev-device-sync-domain = { path = "crates/domain", version = "0.0.1" }
-nddev-device-sync-application = { path = "crates/application", version = "0.0.1" }
+nddev-device-sync-application = { path = "crates/application", version = "0.0.1-alpha.8" }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 keyring = "4.2"
