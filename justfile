@@ -18,6 +18,3 @@ dependencies-check:
     cargo deny --locked check licenses sources
 
 check: fmt-check test clippy dependencies-check
-
-keyring-check:
-    python3 scripts/check-keyring.py
