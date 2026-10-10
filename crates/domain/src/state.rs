@@ -15,7 +15,7 @@ pub struct Snapshot {
     pub data: State,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum State {
     Device {
@@ -63,7 +63,8 @@ impl Snapshot {
         kind: EntityKind,
         entity: &str,
     ) -> Result<(), SyncError> {
-        if self.schema_version != 1
+        if !crate::valid_identifier(entity)
+            || self.schema_version != 1
             || self.observed_at_ms == 0
             || self.observed_at_ms > MAX_REVISION
         {
