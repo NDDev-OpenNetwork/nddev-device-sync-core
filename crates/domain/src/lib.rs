@@ -55,7 +55,9 @@ id_type!(HarnessId);
 id_type!(AccountId);
 id_type!(UserId);
 id_type!(TenantId);
+id_type!(DeviceId);
 
+pub mod devices;
 pub mod identity;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
