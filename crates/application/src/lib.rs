@@ -3,3 +3,4 @@
 
 pub mod devices;
 pub mod identity;
+pub mod sync;
