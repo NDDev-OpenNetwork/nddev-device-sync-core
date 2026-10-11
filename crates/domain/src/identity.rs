@@ -146,6 +146,46 @@ impl Session {
     }
 }
 
+/// A protected local observation, never authority for an online request.
+/// Credential adapters persist it only after verifying the session and active
+/// device, and invalidate it on sign-out or an observed revocation.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CachedDeviceAuthorization {
+    pub origin: String,
+    pub user_id: UserId,
+    pub tenant_id: TenantId,
+    pub device_id: crate::DeviceId,
+    pub verified_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+impl CachedDeviceAuthorization {
+    pub fn authorize_offline(
+        &self,
+        origin: &str,
+        owner: &Owner,
+        device: &crate::DeviceId,
+        now: u64,
+    ) -> Result<(), IdentityError> {
+        if self.origin != origin
+            || self.origin.is_empty()
+            || self.origin.len() > 2048
+            || self.origin.bytes().any(|c| c.is_ascii_control())
+            || self.user_id != owner.user_id
+            || self.tenant_id != owner.tenant_id
+            || &self.device_id != device
+            || self.expires_at_ms <= self.verified_at_ms
+            || self.expires_at_ms - self.verified_at_ms > SESSION_LIFETIME_MS
+            || now < self.verified_at_ms
+            || now >= self.expires_at_ms
+        {
+            return Err(IdentityError::Denied);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct OtpChallenge {
     pub expires_at_ms: u64,
@@ -372,6 +412,98 @@ impl GithubFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_authorization_is_scoped_and_expires_without_online_authority() {
+        let owner = Owner {
+            user_id: UserId::new("owner").unwrap(),
+            tenant_id: TenantId::new("tenant").unwrap(),
+        };
+        let device = crate::DeviceId::new("browser-installation").unwrap();
+        let origin = "https://instance.example/";
+        let grant = CachedDeviceAuthorization {
+            origin: origin.into(),
+            user_id: owner.user_id.clone(),
+            tenant_id: owner.tenant_id.clone(),
+            device_id: device.clone(),
+            verified_at_ms: 10_000,
+            expires_at_ms: 20_000,
+        };
+        for now in [10_000, 19_999] {
+            assert!(
+                grant
+                    .authorize_offline(origin, &owner, &device, now)
+                    .is_ok()
+            );
+        }
+        for now in [0, 9_999, 20_000, u64::MAX] {
+            assert_eq!(
+                grant.authorize_offline(origin, &owner, &device, now),
+                Err(IdentityError::Denied)
+            );
+        }
+        assert!(
+            grant
+                .authorize_offline("https://other.example/", &owner, &device, 15_000)
+                .is_err()
+        );
+        assert!(
+            grant
+                .authorize_offline(
+                    origin,
+                    &owner,
+                    &crate::DeviceId::new("other").unwrap(),
+                    15_000
+                )
+                .is_err()
+        );
+        for owner in [
+            Owner {
+                user_id: UserId::new("other").unwrap(),
+                ..owner.clone()
+            },
+            Owner {
+                tenant_id: TenantId::new("other").unwrap(),
+                ..owner.clone()
+            },
+        ] {
+            assert!(
+                grant
+                    .authorize_offline(origin, &owner, &device, 15_000)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn cached_authorization_cannot_extend_the_existing_session_lifetime() {
+        let owner = Owner {
+            user_id: UserId::new("owner").unwrap(),
+            tenant_id: TenantId::new("tenant").unwrap(),
+        };
+        let device = crate::DeviceId::new("device").unwrap();
+        let mut grant = CachedDeviceAuthorization {
+            origin: "https://instance.example/".into(),
+            user_id: owner.user_id.clone(),
+            tenant_id: owner.tenant_id.clone(),
+            device_id: device.clone(),
+            verified_at_ms: 1,
+            expires_at_ms: SESSION_LIFETIME_MS + 1,
+        };
+        assert!(
+            grant
+                .authorize_offline(&grant.origin, &owner, &device, 2)
+                .is_ok()
+        );
+        for expiry in [0, 1, SESSION_LIFETIME_MS + 2, u64::MAX] {
+            grant.expires_at_ms = expiry;
+            assert!(
+                grant
+                    .authorize_offline(&grant.origin, &owner, &device, 2)
+                    .is_err()
+            );
+        }
+    }
+
     #[test]
     fn otp_checks_eligibility_expiry_attempts_and_single_use() {
         let mut challenge = OtpChallenge::new(100, true).unwrap();

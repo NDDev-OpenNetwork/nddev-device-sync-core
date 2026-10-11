@@ -69,15 +69,17 @@ pub enum Platform {
     Windows,
     Android,
     Ios,
+    Web,
 }
 
 impl Platform {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Macos,
         Self::Linux,
         Self::Windows,
         Self::Android,
         Self::Ios,
+        Self::Web,
     ];
 }
 

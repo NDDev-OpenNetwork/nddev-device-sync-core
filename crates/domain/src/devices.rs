@@ -22,6 +22,7 @@ pub enum DevicePlatform {
     Windows,
     Ios,
     Android,
+    Web,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
