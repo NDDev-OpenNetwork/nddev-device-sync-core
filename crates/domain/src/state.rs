@@ -132,7 +132,7 @@ impl Snapshot {
                 EntityKind::AccountState,
             ) => {
                 entity == format!("{}:nds", writer.as_str())
-                    && matches!(auth_method.as_str(), "email_otp" | "github")
+                    && matches!(auth_method.as_str(), "email_otp" | "github" | "passkey")
                     && *checked_at_ms > 0
                     && *checked_at_ms <= self.observed_at_ms
                     && *expires_at_ms > *checked_at_ms
