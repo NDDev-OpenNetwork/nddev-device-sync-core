@@ -93,6 +93,7 @@ pub enum ModuleCapability {
     SwitchHarnessAccount,
     ReadModuleHealth,
     ApplyUpdates,
+    ShareClipboard,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -103,6 +104,7 @@ pub enum Permission {
     ProcessExecution,
     LocalNetwork,
     UserService,
+    Clipboard,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
