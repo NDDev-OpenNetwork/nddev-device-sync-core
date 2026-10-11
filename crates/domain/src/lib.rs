@@ -59,6 +59,7 @@ pub mod devices;
 pub mod identity;
 pub mod state;
 pub mod sync;
+pub mod vault;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
