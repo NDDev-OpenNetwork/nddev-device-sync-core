@@ -67,10 +67,18 @@ pub enum Platform {
     Macos,
     Linux,
     Windows,
+    Android,
+    Ios,
 }
 
 impl Platform {
-    pub const ALL: [Self; 3] = [Self::Macos, Self::Linux, Self::Windows];
+    pub const ALL: [Self; 5] = [
+        Self::Macos,
+        Self::Linux,
+        Self::Windows,
+        Self::Android,
+        Self::Ios,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -93,6 +101,7 @@ pub enum ModuleCapability {
     SwitchHarnessAccount,
     ReadModuleHealth,
     ApplyUpdates,
+    ShareClipboard,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -103,6 +112,7 @@ pub enum Permission {
     ProcessExecution,
     LocalNetwork,
     UserService,
+    Clipboard,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -130,7 +140,10 @@ impl ModuleDescriptor {
         }
         let mut ids = BTreeSet::new();
         for dependency in &self.dependencies {
-            if dependency.id == self.id || !ids.insert(dependency.id.clone()) {
+            if dependency.minimum_api == 0
+                || dependency.id == self.id
+                || !ids.insert(dependency.id.clone())
+            {
                 return Err(DomainError::InvalidModuleDescriptor);
             }
         }
@@ -267,6 +280,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn module_dependency_requires_a_positive_api_version() {
+        let value = descriptor(
+            "consumer",
+            vec![ModuleDependency {
+                id: ModuleId::new("provider").unwrap(),
+                minimum_api: 0,
+            }],
+        );
+        assert!(matches!(
+            value.validate(),
+            Err(DomainError::InvalidModuleDescriptor)
+        ));
+    }
+
     fn descriptor(id: &str, dependencies: Vec<ModuleDependency>) -> ModuleDescriptor {
         ModuleDescriptor {
             id: ModuleId::new(id).unwrap(),
@@ -355,3 +383,5 @@ mod tests {
         );
     }
 }
+
+pub mod clipboard;

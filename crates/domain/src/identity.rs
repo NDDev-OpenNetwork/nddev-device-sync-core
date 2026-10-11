@@ -108,6 +108,7 @@ impl fmt::Debug for ProtectedDigest {
 pub enum AuthMethod {
     EmailOtp,
     Github,
+    Passkey,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
