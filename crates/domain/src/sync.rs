@@ -116,6 +116,8 @@ pub enum SyncError {
     Idempotency,
     #[error("operation_conflict")]
     KeyConflict,
+    #[error("vault_key_registration_required")]
+    KeyRegistration,
     #[error("revision_exhausted")]
     Revision,
     #[error("server_busy")]

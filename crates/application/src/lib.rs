@@ -4,3 +4,4 @@
 pub mod devices;
 pub mod identity;
 pub mod sync;
+pub mod vault;

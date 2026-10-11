@@ -87,7 +87,7 @@ impl<S: SyncStore> SyncService<S> {
             .await
     }
 }
-fn active(
+pub(crate) fn active(
     authorization: &AuthenticatedSession,
     signed: &SignedRequest,
     now: u64,

@@ -4,17 +4,19 @@ version = 4
 
 [[package]]
 name = "nddev-device-sync-application"
-version = "0.0.1-alpha.10"
+version = "0.0.1-alpha.11"
 dependencies = [
  "nddev-device-sync-domain",
 ]
 
 [[package]]
 name = "nddev-device-sync-domain"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "thiserror",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -101,3 +103,15 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+
+[[package]]
+name = "uuid"
+version = "1.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
+
+[[package]]
+name = "zeroize"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
