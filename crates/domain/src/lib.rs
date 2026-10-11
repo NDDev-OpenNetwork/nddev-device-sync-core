@@ -67,10 +67,18 @@ pub enum Platform {
     Macos,
     Linux,
     Windows,
+    Android,
+    Ios,
 }
 
 impl Platform {
-    pub const ALL: [Self; 3] = [Self::Macos, Self::Linux, Self::Windows];
+    pub const ALL: [Self; 5] = [
+        Self::Macos,
+        Self::Linux,
+        Self::Windows,
+        Self::Android,
+        Self::Ios,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
