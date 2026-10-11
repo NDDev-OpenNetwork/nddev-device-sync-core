@@ -140,7 +140,10 @@ impl ModuleDescriptor {
         }
         let mut ids = BTreeSet::new();
         for dependency in &self.dependencies {
-            if dependency.id == self.id || !ids.insert(dependency.id.clone()) {
+            if dependency.minimum_api == 0
+                || dependency.id == self.id
+                || !ids.insert(dependency.id.clone())
+            {
                 return Err(DomainError::InvalidModuleDescriptor);
             }
         }
@@ -275,6 +278,21 @@ mod tests {
                 ModuleId::new(value).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn module_dependency_requires_a_positive_api_version() {
+        let value = descriptor(
+            "consumer",
+            vec![ModuleDependency {
+                id: ModuleId::new("provider").unwrap(),
+                minimum_api: 0,
+            }],
+        );
+        assert!(matches!(
+            value.validate(),
+            Err(DomainError::InvalidModuleDescriptor)
+        ));
     }
 
     fn descriptor(id: &str, dependencies: Vec<ModuleDependency>) -> ModuleDescriptor {
