@@ -355,3 +355,5 @@ mod tests {
         );
     }
 }
+
+pub mod clipboard;

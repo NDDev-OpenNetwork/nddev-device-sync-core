@@ -1,6 +1,6 @@
 [package]
 name = "nddev-device-sync-domain"
-version = "0.0.4"
+version = "0.0.5"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,4 +9,4 @@ license.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 uuid = { version = "1.27", default-features = false }
-zeroize = "1.8"
+zeroize = { version = "1.8", features = ["serde"] }
