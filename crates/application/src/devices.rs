@@ -166,7 +166,7 @@ fn active(authorization: &AuthenticatedSession, now: u64) -> Result<(), DeviceEr
 pub fn identity_error(error: IdentityError) -> DeviceError {
     match error {
         IdentityError::InvalidInput => DeviceError::InvalidInput,
-        IdentityError::Denied => DeviceError::Denied,
+        IdentityError::Denied | IdentityError::RecentAuthenticationRequired => DeviceError::Denied,
         IdentityError::RateLimited => DeviceError::RateLimited,
         IdentityError::Capacity => DeviceError::Capacity,
         IdentityError::Unavailable => DeviceError::Unavailable,

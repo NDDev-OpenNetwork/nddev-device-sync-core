@@ -9,6 +9,7 @@ pub const OTP_ATTEMPTS: u8 = 5;
 pub const GITHUB_LIFETIME_MS: u64 = 300_000;
 pub const GITHUB_POLL_MS: u64 = 2_000;
 pub const SESSION_LIFETIME_MS: u64 = 28_800_000;
+pub const RECENT_AUTHENTICATION_MS: u64 = 300_000;
 pub const MAX_SESSIONS: usize = 32;
 pub const MAX_PENDING_EMAIL: usize = 1024;
 pub const MAX_PENDING_GITHUB: usize = 128;
@@ -27,6 +28,8 @@ pub enum IdentityError {
     InvalidInput,
     #[error("authentication_failed")]
     Denied,
+    #[error("recent_authentication_required")]
+    RecentAuthenticationRequired,
     #[error("authentication_rate_limited")]
     RateLimited,
     #[error("authentication_capacity_reached")]
@@ -143,6 +146,15 @@ impl Session {
     }
     pub fn active(&self, now: u64) -> bool {
         now < self.expires_at_ms
+    }
+    /// Sensitive credential changes require a recent proof, while ordinary
+    /// account/session authorization retains its original lifetime.
+    pub fn recently_authenticated(&self, now: u64) -> bool {
+        self.active(now)
+            && self
+                .expires_at_ms
+                .checked_sub(SESSION_LIFETIME_MS)
+                .is_some_and(|issued| now >= issued && now - issued <= RECENT_AUTHENTICATION_MS)
     }
 }
 
@@ -412,6 +424,25 @@ impl GithubFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recent_authentication_is_distinct_from_session_validity() {
+        let issued = 1_000_000;
+        let session = Session::new(
+            Owner {
+                user_id: UserId::new("owner").unwrap(),
+                tenant_id: TenantId::new("tenant").unwrap(),
+            },
+            AuthMethod::EmailOtp,
+            issued,
+        )
+        .unwrap();
+        assert!(!session.recently_authenticated(issued - 1));
+        assert!(session.recently_authenticated(issued));
+        assert!(session.recently_authenticated(issued + RECENT_AUTHENTICATION_MS));
+        assert!(!session.recently_authenticated(issued + RECENT_AUTHENTICATION_MS + 1));
+        assert!(session.active(issued + RECENT_AUTHENTICATION_MS + 1));
+        assert!(!session.recently_authenticated(issued + SESSION_LIFETIME_MS));
+    }
     #[test]
     fn cached_authorization_is_scoped_and_expires_without_online_authority() {
         let owner = Owner {
