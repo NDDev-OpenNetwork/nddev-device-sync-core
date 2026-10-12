@@ -1,7 +1,7 @@
 //! Portable encrypted device/module/account read models. Values are observations
 //! by a signing device, never an instruction to mutate a provider's own state.
 use crate::{
-    DeviceId, ModuleId,
+    DeviceId, ModuleId, Platform,
     devices::DeviceName,
     sync::{EntityKind, MAX_REVISION, SyncError},
 };
@@ -81,10 +81,10 @@ impl Snapshot {
             ) => {
                 entity == writer.as_str()
                     && DeviceName::new(display_name.clone()).is_ok()
-                    && matches!(
-                        platform.as_str(),
-                        "linux" | "macos" | "windows" | "android" | "ios"
-                    )
+                    && Platform::deserialize(serde::de::value::StrDeserializer::<
+                        serde::de::value::Error,
+                    >::new(platform))
+                    .is_ok()
                     && (client_version.is_empty() || version(client_version))
             }
             (
@@ -151,6 +151,34 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn device_observations_accept_every_supported_platform_and_reject_unknowns() {
+        let writer = DeviceId::new("device").unwrap();
+        for platform in [
+            "linux", "macos", "windows", "android", "ios", "web", "unknown",
+        ] {
+            let snapshot = Snapshot {
+                schema_version: 1,
+                observed_at_ms: 100,
+                data: State::Device {
+                    display_name: "NDS device".into(),
+                    platform: platform.into(),
+                    client_version: "0.0.1-alpha.19".into(),
+                },
+            };
+            assert_eq!(
+                snapshot
+                    .validate(&writer, EntityKind::DeviceState, "device")
+                    .is_ok(),
+                platform != "unknown"
+            );
+            assert!(
+                snapshot
+                    .validate(&writer, EntityKind::DeviceState, "other")
+                    .is_err()
+            );
+        }
+    }
     #[test]
     fn remote_state_cannot_claim_another_writer_or_unobserved_provider_success() {
         let writer = DeviceId::new("device").unwrap();
