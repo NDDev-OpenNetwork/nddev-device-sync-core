@@ -28,6 +28,9 @@ impl ClientLifecycle {
 pub enum BatchOutcome {
     CaughtUp,
     CatchingUp,
+    /// Authenticated inbox observation; pending uploads may still exist.
+    InboxHead,
+    InboxMore,
     Retryable,
     CapacityExhausted,
     Locked,
@@ -35,7 +38,8 @@ pub enum BatchOutcome {
 
 /// One bounded-delay policy for an identity session's replica. Adapters retain
 /// this schedule across focus, resume and view reopening; replacing timers must
-/// not clear a persistent capacity block. A locked identity terminates this
+/// not clear a persistent upload block. Inbox reads remain eligible under that
+/// block and use their own head/backlog evidence. A locked identity terminates this
 /// lifetime; adapters revalidate through the identity owner before restart.
 #[derive(Default)]
 pub struct ReplicaSchedule {
@@ -44,30 +48,34 @@ pub struct ReplicaSchedule {
 }
 
 impl ReplicaSchedule {
-    /// Adapters check the retained session block before starting replacement
-    /// work on focus, resume or view reopening.
+    /// Adapters select inbox-only work while automatic uploads are blocked.
     pub fn is_capacity_blocked(&self) -> bool {
         self.capacity_blocked
     }
 
+    /// Schedule the next batch without granting upload eligibility. Adapters
+    /// select inbox-only work while the retained capacity block is set.
     pub fn after(&mut self, outcome: BatchOutcome) -> Option<Duration> {
-        if self.capacity_blocked {
-            return None;
-        }
         match outcome {
             BatchOutcome::CapacityExhausted => {
                 self.capacity_blocked = true;
-                None
+                self.failures = 0;
+                Some(Duration::from_secs(15))
             }
             BatchOutcome::Locked => None,
             BatchOutcome::Retryable => {
                 self.failures = self.failures.saturating_add(1).min(5);
                 Some(Duration::from_secs(1 << self.failures))
             }
-            BatchOutcome::CaughtUp | BatchOutcome::CatchingUp => {
+            BatchOutcome::CaughtUp
+            | BatchOutcome::CatchingUp
+            | BatchOutcome::InboxHead
+            | BatchOutcome::InboxMore => {
                 self.failures = 0;
                 Some(match outcome {
-                    BatchOutcome::CatchingUp => Duration::from_millis(200),
+                    BatchOutcome::CatchingUp | BatchOutcome::InboxMore => {
+                        Duration::from_millis(200)
+                    }
                     _ => Duration::from_secs(15),
                 })
             }
@@ -129,13 +137,16 @@ mod tests {
     }
 
     #[test]
-    fn persistent_capacity_stays_blocked_across_activity_and_outcome_reports() {
+    fn capacity_blocks_uploads_but_retains_inbox_progress_across_activity() {
         let mut schedule = ReplicaSchedule::default();
         assert_eq!(
             schedule.after(BatchOutcome::Retryable),
             Some(Duration::from_secs(2))
         );
-        assert_eq!(schedule.after(BatchOutcome::CapacityExhausted), None);
+        assert_eq!(
+            schedule.after(BatchOutcome::CapacityExhausted),
+            Some(Duration::from_secs(15))
+        );
 
         for lifecycle in [
             ClientLifecycle::Inactive,
@@ -143,29 +154,58 @@ mod tests {
             ClientLifecycle::Detached,
             ClientLifecycle::Resumed,
         ] {
-            // Admission may allow another timer; the retained session schedule
-            // still refuses work after focus, resume or reopening a view.
+            // Activity permits another timer without restoring upload authority.
             assert!(schedule.is_capacity_blocked());
             assert!(!(lifecycle.permits_work(Platform::Linux) && !schedule.is_capacity_blocked()));
-            for outcome in [
-                BatchOutcome::Retryable,
-                BatchOutcome::CaughtUp,
-                BatchOutcome::CatchingUp,
-                BatchOutcome::CapacityExhausted,
-                BatchOutcome::Locked,
-            ] {
-                assert_eq!(schedule.after(outcome), None);
-            }
+            // A late full-batch result also cannot clear the block or strand
+            // the inbox by terminating the replacement timer.
+            assert_eq!(
+                schedule.after(BatchOutcome::CaughtUp),
+                Some(Duration::from_secs(15))
+            );
+            assert_eq!(
+                schedule.after(BatchOutcome::CatchingUp),
+                Some(Duration::from_millis(200))
+            );
+            assert_eq!(
+                schedule.after(BatchOutcome::InboxMore),
+                Some(Duration::from_millis(200))
+            );
+            assert_eq!(
+                schedule.after(BatchOutcome::InboxHead),
+                Some(Duration::from_secs(15))
+            );
+            assert!(schedule.is_capacity_blocked());
         }
     }
 
     #[test]
-    fn only_explicit_capacity_retry_restarts_the_retained_schedule() {
+    fn inbox_errors_back_off_without_restoring_uploads_and_lock_stops() {
+        let mut schedule = ReplicaSchedule::default();
+        let _ = schedule.after(BatchOutcome::CapacityExhausted);
+        for seconds in [2, 4, 8, 16, 32, 32] {
+            assert_eq!(
+                schedule.after(BatchOutcome::Retryable),
+                Some(Duration::from_secs(seconds))
+            );
+            assert!(schedule.is_capacity_blocked());
+        }
+        let _ = schedule.after(BatchOutcome::InboxHead);
+        assert_eq!(
+            schedule.after(BatchOutcome::Retryable),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(schedule.after(BatchOutcome::Locked), None);
+        assert!(schedule.is_capacity_blocked());
+    }
+
+    #[test]
+    fn only_explicit_capacity_retry_restores_upload_eligibility() {
         let mut schedule = ReplicaSchedule::default();
         for _ in 0..5 {
             let _ = schedule.after(BatchOutcome::Retryable);
         }
-        assert_eq!(schedule.after(BatchOutcome::CapacityExhausted), None);
+        let _ = schedule.after(BatchOutcome::CapacityExhausted);
         schedule.retry_capacity();
         assert!(!schedule.is_capacity_blocked());
         assert_eq!(
@@ -176,7 +216,14 @@ mod tests {
             schedule.after(BatchOutcome::CaughtUp),
             Some(Duration::from_secs(15))
         );
-        assert_eq!(schedule.after(BatchOutcome::CapacityExhausted), None);
-        assert_eq!(schedule.after(BatchOutcome::CatchingUp), None);
+        assert_eq!(
+            schedule.after(BatchOutcome::CapacityExhausted),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            schedule.after(BatchOutcome::CatchingUp),
+            Some(Duration::from_millis(200))
+        );
+        assert!(schedule.is_capacity_blocked());
     }
 }

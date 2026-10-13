@@ -15,6 +15,9 @@ composes their manifests through the domain graph; core contains no parallel
 assembly registry or claims about installed provider capabilities.
 
 `application::replica::reconcile` owns one bounded client upload/catch-up batch.
+`reconcile_inbox` reuses the same pull path without claiming local uploads.
+Its `inbox_at_head` observation is separate from full `caught_up`: pending work
+still prevents the adapter's atomic freshness mark.
 The vault adapter supplies its existing immutable claims, authenticated transport,
 payload verification and atomic journal commands. It retains concrete storage,
 cryptography, key access and request encoding; core contains no SQL or wire DTOs.
