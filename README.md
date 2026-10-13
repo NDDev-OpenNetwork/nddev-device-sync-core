@@ -14,6 +14,22 @@ Module descriptors belong to their implementing adapters. The native agent
 composes their manifests through the domain graph; core contains no parallel
 assembly registry or claims about installed provider capabilities.
 
+`application::replica::reconcile` owns one bounded client upload/catch-up batch.
+The vault adapter supplies its existing immutable claims, authenticated transport,
+payload verification and atomic journal commands. It retains concrete storage,
+cryptography, key access and request encoding; core contains no SQL or wire DTOs.
+`application::lifecycle` owns visible-client admission and replica backoff. A
+desktop/web window losing input focus can continue bounded work; hidden clients
+and mobile background restrictions retain their existing boundary. Adapters own
+the actual tasks, deadlines and cancellation, and identity remains the existing
+accounts boundary.
+
+Sync pages retain the protocol's 100-item ceiling and the caller's requested
+limit. Server adapters must also enforce `MAX_PAGE_BYTES` on the encoded JSON
+page (60 KiB), preserving room below the clients' 64 KiB response limit. Only a
+contiguous prefix may be returned; byte truncation retains `has_more` and the
+last included cursor. Existing servers returning smaller pages remain usable.
+
 ## Verification
 
 ```sh
