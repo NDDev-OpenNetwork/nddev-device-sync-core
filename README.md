@@ -33,6 +33,12 @@ page (60 KiB), preserving room below the clients' 64 KiB response limit. Only a
 contiguous prefix may be returned; byte truncation retains `has_more` and the
 last included cursor. Existing servers returning smaller pages remain usable.
 
+`domain::screen` and `application::screen` own finite view-only permissions,
+endpoint-binding revisions, frame bounds and the canonical screen-control port.
+Native key proof, authenticated transactions, capture permission and transport
+belong to adapters. Restored screen metadata alone never authorizes capture;
+clients must revalidate their current Accounts lifetime before using it.
+
 ## Verification
 
 ```sh
