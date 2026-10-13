@@ -24,6 +24,12 @@ and mobile background restrictions retain their existing boundary. Adapters own
 the actual tasks, deadlines and cancellation, and identity remains the existing
 accounts boundary.
 
+Sync pages retain the protocol's 100-item ceiling and the caller's requested
+limit. Server adapters must also enforce `MAX_PAGE_BYTES` on the encoded JSON
+page (60 KiB), preserving room below the clients' 64 KiB response limit. Only a
+contiguous prefix may be returned; byte truncation retains `has_more` and the
+last included cursor. Existing servers returning smaller pages remain usable.
+
 ## Verification
 
 ```sh

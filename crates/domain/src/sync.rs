@@ -8,7 +8,10 @@ pub const MAX_PLAIN_BYTES: usize = 16 * 1024;
 pub const MAX_OPERATIONS: u64 = 16_384;
 pub const MAX_STORED_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_ENTITY_COUNT: u64 = 4096;
-pub const MAX_PAGE_ITEMS: usize = 2;
+pub const MAX_PAGE_ITEMS: usize = 100;
+/// Server adapters bound the actual encoded page, including its envelope and
+/// receipts. Clients retain their separate 64 KiB transport response ceiling.
+pub const MAX_PAGE_BYTES: usize = 60 * 1024;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum EntityKind {

@@ -128,7 +128,16 @@ mod tests {
         assert!(page(2, 0, false).validate_after(2).is_ok());
         assert!(page(2, 0, true).validate_after(2).is_err());
         assert!(page(3, 2, false).validate_after(0).is_err());
-        assert!(page(3, 3, false).validate_after(0).is_err());
+        assert!(
+            page(MAX_PAGE_ITEMS as u64, MAX_PAGE_ITEMS, true)
+                .validate_after(0)
+                .is_ok()
+        );
+        assert!(
+            page(MAX_PAGE_ITEMS as u64 + 1, MAX_PAGE_ITEMS + 1, false)
+                .validate_after(0)
+                .is_err()
+        );
         assert!(
             page(MAX_REVISION + 1, 1, false)
                 .validate_after(MAX_REVISION)
