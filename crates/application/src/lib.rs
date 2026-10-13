@@ -8,3 +8,5 @@ pub mod replica;
 pub mod repositories;
 pub mod sync;
 pub mod vault;
+
+pub mod screen;
