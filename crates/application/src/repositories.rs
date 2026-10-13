@@ -3,6 +3,8 @@
 use nddev_device_sync_domain::{modules::ModuleError, repositories::*};
 use std::future::Future;
 
+pub mod catalog;
+
 pub trait ReadGitStatus: Send + Sync {
     type Checkout: ?Sized + Sync;
     type Cancellation: Send;

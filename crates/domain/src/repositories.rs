@@ -2,6 +2,8 @@
 //! rows, provider identity evidence, mutation authorization, or remote freshness.
 use serde::{Deserialize, Serialize};
 
+pub mod catalog;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeadKind {
     Branch,
