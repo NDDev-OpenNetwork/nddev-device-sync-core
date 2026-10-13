@@ -352,6 +352,8 @@ pub struct EndpointBinding {
     pub device: crate::DeviceId,
     pub endpoint: [u8; 32],
     pub revision: u64,
+    /// UUID bytes generated once per endpoint instance, retained across retries.
+    pub instance_id: [u8; 16],
 }
 
 /// Shared proof framing. `origin` is the configured canonical control origin,
@@ -361,11 +363,13 @@ pub fn endpoint_signing_bytes(
     origin: &str,
     device: &crate::DeviceId,
     endpoint: &[u8; 32],
+    instance_id: &[u8; 16],
     base_revision: u64,
     nonce: &str,
     expires_at_ms: u64,
 ) -> Result<Vec<u8>, ModuleError> {
-    if origin.is_empty()
+    if instance_id.iter().all(|byte| *byte == 0)
+        || origin.is_empty()
         || origin.len() > 512
         || !origin.bytes().all(|b| b.is_ascii_graphic())
         || base_revision >= crate::sync::MAX_REVISION
@@ -377,12 +381,13 @@ pub fn endpoint_signing_bytes(
     {
         return Err(ModuleError::InvalidInput);
     }
-    let mut bytes = b"NDS-RDS-ENDPOINT-BINDING-V1\0".to_vec();
+    let mut bytes = b"NDS-RDS-ENDPOINT-BINDING-V2\0".to_vec();
     for field in [origin.as_bytes(), device.as_str().as_bytes()] {
         bytes.extend_from_slice(&(field.len() as u16).to_be_bytes());
         bytes.extend_from_slice(field);
     }
     bytes.extend_from_slice(endpoint);
+    bytes.extend_from_slice(instance_id);
     bytes.extend_from_slice(&base_revision.to_be_bytes());
     bytes.extend_from_slice(&(nonce.len() as u16).to_be_bytes());
     bytes.extend_from_slice(nonce.as_bytes());
@@ -585,17 +590,19 @@ mod proof_tests {
             "https://control.invalid",
             &device,
             &[3; 32],
+            &[9; 16],
             1,
             "screen_nonce_0001",
             60000,
         )
         .unwrap();
-        let mut expected = b"NDS-RDS-ENDPOINT-BINDING-V1\0".to_vec();
+        let mut expected = b"NDS-RDS-ENDPOINT-BINDING-V2\0".to_vec();
         for field in [b"https://control.invalid".as_slice(), b"viewer".as_slice()] {
             expected.extend_from_slice(&(field.len() as u16).to_be_bytes());
             expected.extend_from_slice(field);
         }
         expected.extend_from_slice(&[3; 32]);
+        expected.extend_from_slice(&[9; 16]);
         expected.extend_from_slice(&1u64.to_be_bytes());
         expected.extend_from_slice(&17u16.to_be_bytes());
         expected.extend_from_slice(b"screen_nonce_0001");
@@ -606,6 +613,7 @@ mod proof_tests {
                 "https://other.invalid",
                 &device,
                 &[3; 32],
+                &[9; 16],
                 1,
                 "screen_nonce_0001",
                 60000,
@@ -615,6 +623,7 @@ mod proof_tests {
                 "https://control.invalid",
                 &crate::DeviceId::new("host").unwrap(),
                 &[3; 32],
+                &[9; 16],
                 1,
                 "screen_nonce_0001",
                 60000,
@@ -624,6 +633,7 @@ mod proof_tests {
                 "https://control.invalid",
                 &device,
                 &[4; 32],
+                &[9; 16],
                 1,
                 "screen_nonce_0001",
                 60000,
@@ -633,6 +643,7 @@ mod proof_tests {
                 "https://control.invalid",
                 &device,
                 &[3; 32],
+                &[9; 16],
                 2,
                 "screen_nonce_0001",
                 60000,
@@ -642,6 +653,7 @@ mod proof_tests {
                 "https://control.invalid",
                 &device,
                 &[3; 32],
+                &[9; 16],
                 1,
                 "screen_nonce_0002",
                 60000,
@@ -651,6 +663,7 @@ mod proof_tests {
                 "https://control.invalid",
                 &device,
                 &[3; 32],
+                &[9; 16],
                 1,
                 "screen_nonce_0001",
                 60001,
@@ -661,13 +674,23 @@ mod proof_tests {
         }
         assert!(message.len() < 2048);
         assert!(
-            endpoint_signing_bytes("", &device, &[3; 32], 1, "screen_nonce_0001", 60000).is_err()
+            endpoint_signing_bytes(
+                "",
+                &device,
+                &[3; 32],
+                &[9; 16],
+                1,
+                "screen_nonce_0001",
+                60000
+            )
+            .is_err()
         );
         assert!(
             endpoint_signing_bytes(
                 "https://control.invalid",
                 &device,
                 &[3; 32],
+                &[9; 16],
                 crate::sync::MAX_REVISION,
                 "screen_nonce_0001",
                 60000
@@ -679,8 +702,46 @@ mod proof_tests {
                 "https://control.invalid",
                 &device,
                 &[3; 32],
+                &[9; 16],
                 1,
                 "bad nonce",
+                60000
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn instance_is_signed_and_nil_instance_is_rejected() {
+        let device = crate::DeviceId::new("viewer").unwrap();
+        let first = endpoint_signing_bytes(
+            "https://control.invalid",
+            &device,
+            &[3; 32],
+            &[9; 16],
+            0,
+            "screen_nonce_0001",
+            60000,
+        )
+        .unwrap();
+        let other = endpoint_signing_bytes(
+            "https://control.invalid",
+            &device,
+            &[3; 32],
+            &[8; 16],
+            0,
+            "screen_nonce_0001",
+            60000,
+        )
+        .unwrap();
+        assert_ne!(first, other);
+        assert!(
+            endpoint_signing_bytes(
+                "https://control.invalid",
+                &device,
+                &[3; 32],
+                &[0; 16],
+                0,
+                "screen_nonce_0001",
                 60000
             )
             .is_err()
