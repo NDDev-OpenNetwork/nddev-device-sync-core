@@ -177,8 +177,12 @@ pub enum SyncError {
     KeyRegistration,
     #[error("revision_exhausted")]
     Revision,
+    /// Temporary admission pressure that can recover through bounded retries.
     #[error("server_busy")]
     Capacity,
+    /// Retained history, storage or entity capacity requires an explicit remedy.
+    #[error("sync_capacity_exhausted")]
+    CapacityExhausted,
     #[error("dependency_unavailable")]
     Unavailable,
 }
