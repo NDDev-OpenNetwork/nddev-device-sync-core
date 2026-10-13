@@ -29,19 +29,36 @@ pub enum BatchOutcome {
     CaughtUp,
     CatchingUp,
     Retryable,
+    CapacityExhausted,
     Locked,
 }
 
-/// One bounded-delay policy for an active replica. A locked identity terminates
-/// this lifetime; adapters revalidate through the identity owner before restart.
+/// One bounded-delay policy for an identity session's replica. Adapters retain
+/// this schedule across focus, resume and view reopening; replacing timers must
+/// not clear a persistent capacity block. A locked identity terminates this
+/// lifetime; adapters revalidate through the identity owner before restart.
 #[derive(Default)]
 pub struct ReplicaSchedule {
     failures: u8,
+    capacity_blocked: bool,
 }
 
 impl ReplicaSchedule {
+    /// Adapters check the retained session block before starting replacement
+    /// work on focus, resume or view reopening.
+    pub fn is_capacity_blocked(&self) -> bool {
+        self.capacity_blocked
+    }
+
     pub fn after(&mut self, outcome: BatchOutcome) -> Option<Duration> {
+        if self.capacity_blocked {
+            return None;
+        }
         match outcome {
+            BatchOutcome::CapacityExhausted => {
+                self.capacity_blocked = true;
+                None
+            }
             BatchOutcome::Locked => None,
             BatchOutcome::Retryable => {
                 self.failures = self.failures.saturating_add(1).min(5);
@@ -55,6 +72,13 @@ impl ReplicaSchedule {
                 })
             }
         }
+    }
+
+    /// Clear a capacity block only for an explicit manual retry or a verified
+    /// capacity remedy. Ordinary lifecycle or success reports cannot clear it.
+    pub fn retry_capacity(&mut self) {
+        self.capacity_blocked = false;
+        self.failures = 0;
     }
 }
 
@@ -102,5 +126,57 @@ mod tests {
             Some(Duration::from_secs(15))
         );
         assert_eq!(schedule.after(BatchOutcome::Locked), None);
+    }
+
+    #[test]
+    fn persistent_capacity_stays_blocked_across_activity_and_outcome_reports() {
+        let mut schedule = ReplicaSchedule::default();
+        assert_eq!(
+            schedule.after(BatchOutcome::Retryable),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(schedule.after(BatchOutcome::CapacityExhausted), None);
+
+        for lifecycle in [
+            ClientLifecycle::Inactive,
+            ClientLifecycle::Resumed,
+            ClientLifecycle::Detached,
+            ClientLifecycle::Resumed,
+        ] {
+            // Admission may allow another timer; the retained session schedule
+            // still refuses work after focus, resume or reopening a view.
+            assert!(schedule.is_capacity_blocked());
+            assert!(!(lifecycle.permits_work(Platform::Linux) && !schedule.is_capacity_blocked()));
+            for outcome in [
+                BatchOutcome::Retryable,
+                BatchOutcome::CaughtUp,
+                BatchOutcome::CatchingUp,
+                BatchOutcome::CapacityExhausted,
+                BatchOutcome::Locked,
+            ] {
+                assert_eq!(schedule.after(outcome), None);
+            }
+        }
+    }
+
+    #[test]
+    fn only_explicit_capacity_retry_restarts_the_retained_schedule() {
+        let mut schedule = ReplicaSchedule::default();
+        for _ in 0..5 {
+            let _ = schedule.after(BatchOutcome::Retryable);
+        }
+        assert_eq!(schedule.after(BatchOutcome::CapacityExhausted), None);
+        schedule.retry_capacity();
+        assert!(!schedule.is_capacity_blocked());
+        assert_eq!(
+            schedule.after(BatchOutcome::Retryable),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            schedule.after(BatchOutcome::CaughtUp),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(schedule.after(BatchOutcome::CapacityExhausted), None);
+        assert_eq!(schedule.after(BatchOutcome::CatchingUp), None);
     }
 }
