@@ -72,6 +72,57 @@ mod tests {
         operation.payload.ciphertext.resize(MAX_PLAIN_BYTES + 17, 0);
         assert_eq!(operation.validate(100), Err(SyncError::Invalid));
     }
+
+    #[test]
+    fn scoped_request_identity_includes_device_and_immutable_content() {
+        let original = operation();
+        assert!(original == original.clone());
+        let mut other = original.clone();
+        other.device = DeviceId::new("other-device").unwrap();
+        assert!(original != other);
+        let mut other = original.clone();
+        other.idempotency_key = "other-key".into();
+        assert!(original != other);
+        let mut other = original.clone();
+        other.payload.ciphertext[0] ^= 1;
+        assert!(original != other);
+    }
+
+    #[test]
+    fn receipts_reject_wrong_operation_revision_and_sequence() {
+        let operation = operation();
+        let mut receipt = Receipt {
+            operation_id: operation.id.clone(),
+            server_seq: 1,
+            decision: Decision::Apply { revision: 1 },
+        };
+        assert!(receipt.validate_for(&operation).is_ok());
+        receipt.operation_id = "other".into();
+        assert!(receipt.validate_for(&operation).is_err());
+        receipt.operation_id = operation.id.clone();
+        receipt.decision = Decision::Apply { revision: 2 };
+        assert!(receipt.validate_for(&operation).is_err());
+        receipt.decision = Decision::Conflict {
+            base_revision: 0,
+            current_revision: 3,
+        };
+        assert!(receipt.validate_for(&operation).is_ok());
+        receipt.decision = Decision::Conflict {
+            base_revision: 0,
+            current_revision: 0,
+        };
+        assert!(receipt.validate_for(&operation).is_err());
+        receipt.decision = Decision::Conflict {
+            base_revision: 1,
+            current_revision: 3,
+        };
+        assert!(receipt.validate_for(&operation).is_err());
+        receipt.decision = Decision::Apply { revision: 1 };
+        for sequence in [0, MAX_REVISION + 1] {
+            receipt.server_seq = sequence;
+            assert!(receipt.validate_for(&operation).is_err());
+        }
+    }
 }
 impl EntityKind {
     pub fn as_str(self) -> &'static str {
@@ -84,13 +135,16 @@ impl EntityKind {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncryptedPayload {
     pub key_id: String,
     pub nonce: [u8; 12],
     pub ciphertext: Vec<u8>,
 }
-#[derive(Clone)]
+/// Equality identifies the entire validated request, including its device and
+/// ciphertext. It does not compare the original transport encoding; append
+/// retries and acknowledgements must separately retain those exact bytes.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Operation {
     pub id: String,
     pub device: DeviceId,
@@ -134,6 +188,41 @@ pub enum Decision {
         base_revision: u64,
         current_revision: u64,
     },
+}
+
+/// An authoritative result is interpreted only with its originating operation.
+/// The wire receipt alone has no device identity and cannot settle a local ID.
+#[derive(PartialEq, Eq)]
+pub struct Receipt {
+    pub operation_id: String,
+    pub server_seq: u64,
+    pub decision: Decision,
+}
+
+impl Receipt {
+    pub fn validate_for(&self, operation: &Operation) -> Result<(), SyncError> {
+        if self.operation_id != operation.id || !(1..=MAX_REVISION).contains(&self.server_seq) {
+            return Err(SyncError::Invalid);
+        }
+        let valid = match self.decision {
+            Decision::Apply { revision } => {
+                revision <= MAX_REVISION && operation.base_revision.checked_add(1) == Some(revision)
+            }
+            Decision::Conflict {
+                base_revision,
+                current_revision,
+            } => {
+                base_revision == operation.base_revision
+                    && current_revision != base_revision
+                    && current_revision <= MAX_REVISION
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(SyncError::Invalid)
+        }
+    }
 }
 fn long_id(value: &str) -> bool {
     !value.is_empty()
