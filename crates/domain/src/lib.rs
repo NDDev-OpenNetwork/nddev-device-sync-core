@@ -58,6 +58,7 @@ id_type!(DeviceId);
 pub mod devices;
 pub mod identity;
 pub mod modules;
+pub mod repositories;
 pub mod state;
 pub mod sync;
 pub mod vault;
