@@ -73,6 +73,9 @@ impl ReplicaSchedule {
             | BatchOutcome::InboxMore => {
                 self.failures = 0;
                 Some(match outcome {
+                    // A generic late result may only report pending uploads;
+                    // only InboxMore proves backlog worth an immediate pull.
+                    BatchOutcome::CatchingUp if self.capacity_blocked => Duration::from_secs(15),
                     BatchOutcome::CatchingUp | BatchOutcome::InboxMore => {
                         Duration::from_millis(200)
                     }
@@ -165,7 +168,7 @@ mod tests {
             );
             assert_eq!(
                 schedule.after(BatchOutcome::CatchingUp),
-                Some(Duration::from_millis(200))
+                Some(Duration::from_secs(15))
             );
             assert_eq!(
                 schedule.after(BatchOutcome::InboxMore),
@@ -209,6 +212,10 @@ mod tests {
         schedule.retry_capacity();
         assert!(!schedule.is_capacity_blocked());
         assert_eq!(
+            schedule.after(BatchOutcome::CatchingUp),
+            Some(Duration::from_millis(200))
+        );
+        assert_eq!(
             schedule.after(BatchOutcome::Retryable),
             Some(Duration::from_secs(2))
         );
@@ -222,7 +229,7 @@ mod tests {
         );
         assert_eq!(
             schedule.after(BatchOutcome::CatchingUp),
-            Some(Duration::from_millis(200))
+            Some(Duration::from_secs(15))
         );
         assert!(schedule.is_capacity_blocked());
     }
