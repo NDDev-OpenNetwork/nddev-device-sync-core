@@ -12,6 +12,6 @@ license = "AGPL-3.0-only"
 authors = ["NDDev OpenNetwork"]
 
 [workspace.dependencies]
-nddev-device-sync-domain = { path = "crates/domain", version = "0.0.9" }
+nddev-device-sync-domain = { path = "crates/domain", version = "0.0.10" }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
