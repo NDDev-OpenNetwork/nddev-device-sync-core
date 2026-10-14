@@ -1,5 +1,6 @@
 //! Authenticated synchronization ports; concrete signatures and transactions are
 //! adapters. Never acknowledge a mutation before its durable atomic result.
+pub mod history;
 pub use nddev_device_sync_domain::{DeviceId, identity::AuthenticatedSession, sync::*};
 use std::future::Future;
 
@@ -18,8 +19,8 @@ pub struct Entry {
     pub result_body: Vec<u8>,
     pub server_seq: u64,
 }
-pub struct Page {
-    pub entries: Vec<Entry>,
+pub struct Page<E = Entry> {
+    pub entries: Vec<E>,
     pub next_after: u64,
     pub has_more: bool,
 }
