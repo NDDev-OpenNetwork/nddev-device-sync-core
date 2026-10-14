@@ -1,13 +1,17 @@
 //! One transient authenticated GitHub page for NdsClient. No secret, wire,
 //! persistent registry, filesystem placement or Git mutation authority.
 use crate::{modules::ModuleError, sync::MAX_REVISION, valid_identifier};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+
+pub mod observations;
 
 pub const REPOSITORIES_PER_PAGE: usize = 25;
 pub const MAX_CATALOG_PAGES: u8 = 64;
 
 /// Existing vault revision and pending operation identity, not a second counter.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CredentialSelection {
     record_ref: String,
     revision: u64,
@@ -19,17 +23,13 @@ impl CredentialSelection {
         revision: u64,
         pending_id: Option<String>,
     ) -> Result<Self, ModuleError> {
-        if !valid_identifier(&record_ref)
-            || revision > MAX_REVISION
-            || pending_id.as_ref().is_some_and(|id| !valid_identifier(id))
-        {
-            return Err(ModuleError::InvalidInput);
-        }
-        Ok(Self {
+        let value = Self {
             record_ref,
             revision,
             pending_id,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
     pub fn record_ref(&self) -> &str {
         &self.record_ref
@@ -42,7 +42,8 @@ impl CredentialSelection {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "u64", into = "u64")]
 pub struct RepositoryId(u64);
 impl RepositoryId {
     pub fn new(value: u64) -> Result<Self, ModuleError> {
@@ -55,7 +56,8 @@ impl RepositoryId {
         self.0
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "u64", into = "u64")]
 pub struct GithubAccountId(u64);
 impl GithubAccountId {
     pub fn new(value: u64) -> Result<Self, ModuleError> {
@@ -69,24 +71,28 @@ impl GithubAccountId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GithubOwnerKind {
     User,
     Organization,
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GithubOwner {
     pub id: GithubAccountId,
     pub kind: GithubOwnerKind,
     pub login: String,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RepositoryVisibility {
     Public,
     Private,
     Internal,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositorySummary {
     pub id: RepositoryId,
     pub owner: GithubOwner,
@@ -122,6 +128,7 @@ impl CatalogPageRequest {
         selection: CredentialSelection,
         after: Option<&CatalogCursor>,
     ) -> Result<Self, ModuleError> {
+        selection.validate()?;
         let (expected_principal, page) = match after {
             Some(cursor)
                 if cursor.selection == selection
@@ -183,6 +190,12 @@ fn locator(value: &str, max: usize) -> bool {
             .chars()
             .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
 }
+fn repository_fields(name: &str, branch: &Option<String>) -> bool {
+    locator(name, 400)
+        && !branch
+            .as_ref()
+            .is_some_and(|b| b.is_empty() || b.len() > 1024 || b.chars().any(char::is_control))
+}
 impl ProviderRepositoryPage {
     pub fn into_page(self, request: &CatalogPageRequest) -> Result<RepositoryPage, ModuleError> {
         if self.principal.kind != GithubOwnerKind::User
@@ -201,10 +214,7 @@ impl ProviderRepositoryPage {
         for repository in self.repositories {
             if !ids.insert(repository.id)
                 || !locator(&repository.owner.login, 256)
-                || !locator(&repository.name, 400)
-                || repository.default_branch.as_ref().is_some_and(|branch| {
-                    branch.is_empty() || branch.len() > 1024 || branch.chars().any(char::is_control)
-                })
+                || !repository_fields(&repository.name, &repository.default_branch)
             {
                 return Err(ModuleError::InvalidResponse);
             }
@@ -236,6 +246,51 @@ impl ProviderRepositoryPage {
             observed_at_ms: self.observed_at_ms,
             continuation,
         })
+    }
+}
+
+impl CredentialSelection {
+    pub fn validate(&self) -> Result<(), ModuleError> {
+        if !valid_identifier(&self.record_ref)
+            || self.revision > MAX_REVISION
+            || self
+                .pending_id
+                .as_ref()
+                .is_some_and(|id| !valid_identifier(id))
+        {
+            return Err(ModuleError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+impl TryFrom<u64> for RepositoryId {
+    type Error = ModuleError;
+    fn try_from(v: u64) -> Result<Self, Self::Error> {
+        Self::new(v)
+    }
+}
+impl From<RepositoryId> for u64 {
+    fn from(v: RepositoryId) -> Self {
+        v.value()
+    }
+}
+impl TryFrom<u64> for GithubAccountId {
+    type Error = ModuleError;
+    fn try_from(v: u64) -> Result<Self, Self::Error> {
+        Self::new(v)
+    }
+}
+impl From<GithubAccountId> for u64 {
+    fn from(v: GithubAccountId) -> Self {
+        v.value()
+    }
+}
+impl GithubOwner {
+    pub fn validate(&self) -> Result<(), ModuleError> {
+        if !locator(&self.login, 256) {
+            return Err(ModuleError::InvalidResponse);
+        }
+        Ok(())
     }
 }
 

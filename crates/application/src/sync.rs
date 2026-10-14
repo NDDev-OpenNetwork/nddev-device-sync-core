@@ -1,5 +1,6 @@
 //! Authenticated synchronization ports; concrete signatures and transactions are
 //! adapters. Never acknowledge a mutation before its durable atomic result.
+pub mod history;
 pub use nddev_device_sync_domain::{DeviceId, identity::AuthenticatedSession, sync::*};
 use std::future::Future;
 
@@ -18,8 +19,8 @@ pub struct Entry {
     pub result_body: Vec<u8>,
     pub server_seq: u64,
 }
-pub struct Page {
-    pub entries: Vec<Entry>,
+pub struct Page<E = Entry> {
+    pub entries: Vec<E>,
     pub next_after: u64,
     pub has_more: bool,
 }
@@ -62,7 +63,14 @@ impl<S: SyncStore> SyncService<S> {
         now: u64,
     ) -> Result<StoredResult, SyncError> {
         active(authorization, &signed, now)?;
-        operation.validate(original_body.len())?;
+        // This existing service is explicitly the deployed V2 entrypoint.
+        // New kinds/versions use HistoryStore's canonical versioned boundary.
+        let legacy = nddev_device_sync_domain::sync::history::VersionedOperation {
+            operation,
+            version: nddev_device_sync_domain::sync::history::OperationVersion::V2,
+        };
+        legacy.validate(original_body.len())?;
+        let operation = legacy.operation;
         if signed.device != operation.device {
             return Err(SyncError::Denied);
         }

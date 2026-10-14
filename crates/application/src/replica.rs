@@ -1,25 +1,93 @@
-//! One bounded upload/catch-up use case for native and browser replicas.
-//! Adapters own authorization, crypto, wire encoding and concrete I/O. Storage
-//! commands remain whole transactions; this use case never splits a store read
-//! and its guarded mutation across separate ports.
-use nddev_device_sync_domain::sync::{MAX_PAGE_ITEMS, MAX_REVISION, SyncError};
+//! One bounded replica/recovery policy for native and browser callers.
+//! Adapters own protected authorization, crypto, verified wire and atomic I/O.
+use crate::sync::history::{ActiveStage, BaseRead, CheckpointPort, StageResume, VerifiedBasePage};
+use nddev_device_sync_domain::sync::{history::*, *};
 use std::{future::Future, time::Duration};
-
+pub mod writer;
+pub use writer::*;
 pub const MAX_UPLOADS: usize = 16;
 pub const MAX_PULL_PAGES: usize = 16;
 pub const BATCH_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Metadata accompanying an entirely authenticated/validated page. The store
-/// must still check every committed sequence against its cursor transactionally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadMode {
+    Legacy,
+    Versioned,
+}
+pub struct Capabilities {
+    pub reader_versions: [u8; 2],
+    pub writer: WriterMode,
+    pub retention: bool,
+}
+pub enum Negotiation {
+    LegacyUnsupported,
+    Capabilities(Capabilities),
+}
+pub struct PreparedContext {
+    pub key_id: String,
+    pub observed_basis: Option<u64>,
+}
+pub enum Preparation {
+    Ready(PreparedContext),
+    ReadBudgetExhausted,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnknownReason {
+    BasisExpired,
+    LegacyMissing,
+}
+pub enum AppendOutcome<R> {
+    Receipt(R),
+    Unknown(UnknownReason),
+}
+pub enum ReadOutcome<P> {
+    Page(P),
+    Expired(HistoryVersion),
+    LegacyExpired,
+}
+
+/// Core constructs exactly once. Discovery and all recovery reads borrow it;
+/// adapters cannot construct a replacement or reset counters.
+pub struct BatchBudget {
+    reads: usize,
+    uploads: usize,
+}
+impl BatchBudget {
+    fn new() -> Self {
+        Self {
+            reads: MAX_PULL_PAGES,
+            uploads: MAX_UPLOADS,
+        }
+    }
+    pub fn take_read(&mut self) -> bool {
+        if self.reads == 0 {
+            false
+        } else {
+            self.reads -= 1;
+            true
+        }
+    }
+    pub fn reads_remaining(&self) -> usize {
+        self.reads
+    }
+    fn take_upload(&mut self) -> bool {
+        if self.uploads == 0 {
+            false
+        } else {
+            self.uploads -= 1;
+            true
+        }
+    }
+}
 pub struct VerifiedPage<P> {
     pub contents: P,
     pub next_after: u64,
     pub entries: usize,
     pub has_more: bool,
+    pub history: Option<HistoryVersion>,
 }
-
 impl<P> VerifiedPage<P> {
-    fn validate_after(&self, cursor: u64) -> Result<(), SyncError> {
+    fn validate_after(&self, cursor: u64, mode: ReadMode) -> Result<(), SyncError> {
         if self.entries > MAX_PAGE_ITEMS
             || self.has_more && self.entries == 0
             || self.next_after > MAX_REVISION
@@ -27,296 +95,415 @@ impl<P> VerifiedPage<P> {
         {
             return Err(SyncError::Invalid);
         }
-        Ok(())
+        match (mode, self.history) {
+            (ReadMode::Legacy, None) => Ok(()),
+            (ReadMode::Versioned, Some(history)) => {
+                history.validate()?;
+                if cursor < history.floor
+                    || self.next_after > history.head
+                    || (!self.has_more && self.next_after != history.head)
+                    || self.has_more && self.next_after >= history.head
+                {
+                    return Err(SyncError::Invalid);
+                }
+                Ok(())
+            }
+            _ => Err(SyncError::Invalid),
+        }
     }
 }
-
 pub struct Progress {
     pub uploaded: usize,
     pub received: usize,
     pub cursor: u64,
-    /// The verified server page reported no more history at this cursor. This
-    /// does not establish full reconciliation while local uploads remain.
     pub inbox_at_head: bool,
     pub caught_up: bool,
 }
-
-/// Implemented by the existing vault storage/transport/verification composition.
-/// Associated payloads preserve one generated wire model in its adapter. Native
-/// implementations produce Send futures; browser futures may remain local.
 pub trait ReplicaPort {
     type Error: From<SyncError>;
     type Pending;
     type Receipt;
     type Page;
-
-    /// Atomically claim at most MAX_UPLOADS immutable roots before network I/O.
+    fn negotiate(&self) -> impl Future<Output = Result<Negotiation, Self::Error>>;
+    fn writer_facts(&self) -> impl Future<Output = Result<WriterFacts, Self::Error>>;
+    /// Current protected auth/key/fence checked by the adapter. Take one read
+    /// BEFORE every History/Base key-discovery request. No new batch deadline.
+    fn prepare_context(
+        &self,
+        mode: ReadMode,
+        budget: &mut BatchBudget,
+    ) -> impl Future<Output = Result<Preparation, Self::Error>>;
+    fn confirm_writer(
+        &self,
+        expected: &WriterFacts,
+        confirmed: ConfirmedWriter,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
     fn claim(&self) -> impl Future<Output = Result<Vec<Self::Pending>, Self::Error>>;
-    /// Verify the local payload, then send its original persisted bytes. Every
-    /// request rechecks authorization through the existing identity boundary.
-    fn append(
+    fn append_outcome(
         &self,
         pending: &Self::Pending,
-    ) -> impl Future<Output = Result<Self::Receipt, Self::Error>>;
-    /// One transaction checks the exact claimed bytes/device, stores the receipt
-    /// and settles that root's successors. An already settled request is safe.
+    ) -> impl Future<Output = Result<AppendOutcome<Self::Receipt>, Self::Error>>;
+    /// Exact dispatched original check; metadata only, never settlement/rewrite.
+    fn remember_unknown(
+        &self,
+        pending: &Self::Pending,
+        reason: UnknownReason,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
     fn acknowledge(
         &self,
         pending: Self::Pending,
         receipt: Self::Receipt,
     ) -> impl Future<Output = Result<(), Self::Error>>;
     fn cursor(&self) -> impl Future<Output = Result<u64, Self::Error>>;
-    /// Decode and authenticate the entire page before exposing it for commit.
-    fn verified_page(
+    fn history_outcome(
         &self,
+        mode: ReadMode,
         after: u64,
         limit: usize,
-    ) -> impl Future<Output = Result<VerifiedPage<Self::Page>, Self::Error>>;
-    /// One transaction applies verified entries, scoped settlements and cursor.
+    ) -> impl Future<Output = Result<ReadOutcome<VerifiedPage<Self::Page>>, Self::Error>>;
     fn ingest(&self, page: Self::Page) -> impl Future<Output = Result<(), Self::Error>>;
-    /// Atomically record freshness only if the cursor still matches and there
-    /// are no pending operations. False may mean uploads remain even when the
-    /// inbox has reached the observed server head.
     fn caught_up(&self, cursor: u64) -> impl Future<Output = Result<bool, Self::Error>>;
 }
-
-/// The caller first prepares authorized key access, admits one sync batch and
-/// applies BATCH_DEADLINE plus its lifecycle cancellation. Dropping this future
-/// never deletes pending work: unknown POST outcomes remain durable for replay,
-/// and store adapters retain admission until actual transaction completion.
-pub async fn reconcile<P: ReplicaPort>(port: &P) -> Result<Progress, P::Error> {
-    let pending = port.claim().await?;
-    if pending.len() > MAX_UPLOADS {
-        return Err(SyncError::Invalid.into());
+fn negotiated(value: Negotiation) -> Result<(ReadMode, Option<WriterMode>), SyncError> {
+    match value {
+        Negotiation::LegacyUnsupported => Ok((ReadMode::Legacy, None)),
+        Negotiation::Capabilities(c) => {
+            if !matches!(c.reader_versions, [2, 3] | [3, 2])
+                || c.retention != (c.writer == WriterMode::V3)
+            {
+                return Err(SyncError::Invalid);
+            }
+            Ok((ReadMode::Versioned, Some(c.writer)))
+        }
     }
-    let mut uploaded = 0;
-    for pending in pending {
-        let receipt = port.append(&pending).await?;
-        port.acknowledge(pending, receipt).await?;
-        uploaded += 1;
-    }
-    let mut progress = reconcile_inbox(port).await?;
-    progress.uploaded = uploaded;
-    Ok(progress)
 }
-
-/// Catch up authenticated history without claiming or sending local uploads.
-/// The caller applies the same authorization, admission, BATCH_DEADLINE and
-/// cancellation as full reconciliation. The existing atomic freshness check
-/// still refuses full caught_up/last_sync advancement while uploads remain.
-pub async fn reconcile_inbox<P: ReplicaPort>(port: &P) -> Result<Progress, P::Error> {
+fn validate_stage<S, G>(stage: &ActiveStage<S, G>) -> Result<(), SyncError> {
+    let b = stage.base;
+    if b.base > MAX_REVISION
+        || b.total > MAX_OPERATIONS as usize
+        || b.received > b.total
+        || b.after_member > b.base
+        || stage.through < b.base
+        || stage.through > MAX_REVISION
+        || stage.install_version.cursor > MAX_REVISION
+        || stage.install_version.known_committed_seq > MAX_REVISION
+        || (!b.complete() && (stage.through != b.base || stage.tail_at_head))
+    {
+        return Err(SyncError::Invalid);
+    }
+    Ok(())
+}
+/// Reconcile all paths with one budget/deadline owned by the caller. A resumed
+/// stage wins before claim and remains opaque/durable across partial batches.
+pub async fn reconcile_history<P: CheckpointPort>(
+    port: &P,
+    inbox_only: bool,
+) -> Result<Progress, P::Error> {
+    let mut budget = BatchBudget::new();
     let mut progress = Progress {
         uploaded: 0,
         received: 0,
-        cursor: 0,
+        cursor: port.cursor().await?,
         inbox_at_head: false,
         caught_up: false,
     };
-    for _ in 0..MAX_PULL_PAGES {
-        let cursor = port.cursor().await?;
-        let page = port.verified_page(cursor, MAX_PAGE_ITEMS).await?;
-        page.validate_after(cursor)?;
-        let more = page.has_more;
-        progress.cursor = page.next_after;
-        progress.received += page.entries;
-        port.ingest(page.contents).await?;
-        if !more {
-            progress.inbox_at_head = true;
-            progress.caught_up = port.caught_up(progress.cursor).await?;
-            break;
+    let (mode, writer) = negotiated(port.negotiate().await?)?;
+    let facts = port.writer_facts().await?;
+    if facts
+        .confirmed
+        .as_ref()
+        .is_some_and(|c| c.mode == WriterMode::V3 && writer != Some(WriterMode::V3))
+    {
+        return Err(SyncError::Invalid.into());
+    }
+    let prepared = match port.prepare_context(mode, &mut budget).await? {
+        Preparation::Ready(v) => v,
+        Preparation::ReadBudgetExhausted => return Ok(progress),
+    };
+    if prepared.key_id.is_empty() {
+        return Err(SyncError::KeyRegistration.into());
+    }
+    if facts
+        .confirmed
+        .as_ref()
+        .is_some_and(|c| c.key_id != prepared.key_id)
+    {
+        return Err(SyncError::KeyConflict.into());
+    }
+    if let Some(writer) = writer {
+        if let Some(basis) = prepared.observed_basis {
+            let next = confirm_writer_facts(&facts, writer, &prepared.key_id, basis)?;
+            if facts.confirmed.as_ref() != Some(&next) {
+                port.confirm_writer(&facts, next).await?;
+            }
+        } else if !facts
+            .confirmed
+            .as_ref()
+            .is_some_and(|c| c.mode == writer && c.key_id == prepared.key_id)
+        {
+            return Err(SyncError::KeyRegistration.into());
         }
     }
+    let mut restarts = 0;
+    let resumed = match port.checkpoint_resume().await? {
+        StageResume::Absent => None,
+        StageResume::Active(s) => {
+            validate_stage(&s)?;
+            Some(s)
+        }
+        StageResume::Stale(s) => {
+            port.checkpoint_discard(s).await?;
+            restarts = 1;
+            None
+        }
+    };
+    let had_stage = resumed.is_some();
+    let mut recovery_started = had_stage;
+    if let Some(stage) = resumed {
+        if mode != ReadMode::Versioned {
+            return Err(SyncError::Invalid.into());
+        }
+        if !recover(
+            port,
+            Some(stage),
+            None,
+            &mut budget,
+            &mut restarts,
+            &mut progress,
+        )
+        .await?
+        {
+            progress.cursor = port.cursor().await?;
+            return Ok(progress);
+        }
+    }
+    if !inbox_only && !had_stage {
+        let pending = port.claim().await?;
+        if pending.len() > MAX_UPLOADS {
+            return Err(SyncError::Invalid.into());
+        }
+        for pending in pending {
+            if !budget.take_upload() {
+                break;
+            }
+            match port.append_outcome(&pending).await? {
+                AppendOutcome::Receipt(receipt) => {
+                    port.acknowledge(pending, receipt).await?;
+                    progress.uploaded += 1;
+                }
+                AppendOutcome::Unknown(reason) => port.remember_unknown(&pending, reason).await?,
+            }
+        }
+    }
+    while budget.take_read() {
+        let cursor = port.cursor().await?;
+        match port.history_outcome(mode, cursor, MAX_PAGE_ITEMS).await? {
+            ReadOutcome::Page(page) => {
+                page.validate_after(cursor, mode)?;
+                let more = page.has_more;
+                progress.received += page.entries;
+                progress.cursor = page.next_after;
+                port.ingest(page.contents).await?;
+                if !more {
+                    progress.inbox_at_head = true;
+                    progress.caught_up = port.caught_up(progress.cursor).await?;
+                    break;
+                }
+            }
+            ReadOutcome::LegacyExpired => {
+                // Explicit legacy transport has no frozen-base recovery. Return
+                // an existing visible typed refusal, never silent partial work.
+                return Err(if mode == ReadMode::Legacy {
+                    SyncError::Unavailable
+                } else {
+                    SyncError::Invalid
+                }
+                .into());
+            }
+            ReadOutcome::Expired(history) => {
+                history.validate()?;
+                if mode != ReadMode::Versioned {
+                    return Err(SyncError::Invalid.into());
+                }
+                if recovery_started {
+                    if restarts >= 1 {
+                        break;
+                    }
+                    restarts += 1;
+                }
+                recovery_started = true;
+                if !recover(
+                    port,
+                    None,
+                    Some(history),
+                    &mut budget,
+                    &mut restarts,
+                    &mut progress,
+                )
+                .await?
+                {
+                    break;
+                }
+            }
+        }
+    }
+    progress.cursor = port.cursor().await?;
     Ok(progress)
 }
+/// Compatibility entry points are thin wrappers, never a second legacy loop.
+pub async fn reconcile<P: CheckpointPort>(port: &P) -> Result<Progress, P::Error> {
+    reconcile_history(port, false).await
+}
+pub async fn reconcile_inbox<P: CheckpointPort>(port: &P) -> Result<Progress, P::Error> {
+    reconcile_history(port, true).await
+}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{
-        cell::{Cell, RefCell},
-        collections::VecDeque,
-        task::{Context, Poll, Waker},
-    };
-
-    // Pure use-case unit adapter, not storage/transport integration evidence.
-    struct UnitPort {
-        pending: Cell<usize>,
-        pages: RefCell<VecDeque<VerifiedPage<u64>>>,
-        cursor: Cell<u64>,
-        upload_calls: Cell<usize>,
-        ingested: Cell<usize>,
-        freshness_marks: Cell<usize>,
-    }
-    impl UnitPort {
-        fn new(pending: usize, pages: Vec<VerifiedPage<u64>>) -> Self {
-            Self {
-                pending: Cell::new(pending),
-                pages: RefCell::new(pages.into()),
-                cursor: Cell::new(0),
-                upload_calls: Cell::new(0),
-                ingested: Cell::new(0),
-                freshness_marks: Cell::new(0),
+async fn recover<P: CheckpointPort>(
+    port: &P,
+    mut stage: Option<ActiveStage<P::Stage, P::Guard>>,
+    mut requested: Option<HistoryVersion>,
+    budget: &mut BatchBudget,
+    restarts: &mut usize,
+    progress: &mut Progress,
+) -> Result<bool, P::Error> {
+    loop {
+        if stage.as_ref().is_some_and(|s| {
+            install_decision(
+                &s.guard,
+                &s.guard,
+                s.install_version,
+                s.install_version,
+                s.through,
+                s.base.complete(),
+            )
+            .is_ok()
+        }) {
+            let s = stage.take().ok_or(SyncError::Invalid)?;
+            port.install_checkpoint(&s.guard, s.stage).await?;
+            // Installation is not freshness. Caller must perform ordinary delta.
+            return Ok(true);
+        }
+        if !budget.take_read() {
+            return Ok(false);
+        }
+        if stage.as_ref().is_some_and(|s| s.base.complete()) {
+            let s = stage.as_mut().ok_or(SyncError::Invalid)?;
+            match port
+                .history_outcome(ReadMode::Versioned, s.through, MAX_PAGE_ITEMS)
+                .await?
+            {
+                ReadOutcome::Page(page) => {
+                    let history = page.history.ok_or(SyncError::Invalid)?;
+                    history.validate()?;
+                    // Complete old base remains valid while its contiguous tail
+                    // covers the current floor. Token expiry does not revoke
+                    // already authenticated/staged bytes (canonical client install).
+                    page.validate_after(s.through, ReadMode::Versioned)?;
+                    let next = page.next_after;
+                    let at_head = !page.has_more;
+                    progress.received += page.entries;
+                    port.checkpoint_delta(&s.stage, page).await?;
+                    s.through = next;
+                    s.tail_at_head = at_head;
+                }
+                ReadOutcome::Expired(v) => {
+                    if !restart(port, &mut stage, v, &mut requested, restarts).await? {
+                        return Ok(false);
+                    }
+                }
+                ReadOutcome::LegacyExpired => return Err(SyncError::Invalid.into()),
+            }
+        } else {
+            let (base, after) = if let Some(s) = &stage {
+                (s.base.base, s.base.after_member)
+            } else {
+                let v = requested.ok_or(SyncError::Invalid)?;
+                (v.base, 0)
+            };
+            match port
+                .checkpoint_page(BaseRead {
+                    base,
+                    after_member: after,
+                    limit: MAX_PAGE_ITEMS,
+                })
+                .await?
+            {
+                ReadOutcome::Page(page) => {
+                    if page.base != base {
+                        return Err(SyncError::Invalid.into());
+                    }
+                    if stage.is_none() {
+                        let s = port
+                            .checkpoint_begin(page.base, page.expected_members)
+                            .await?;
+                        validate_stage(&s)?;
+                        if s.base
+                            != (BaseProgress {
+                                base: page.base,
+                                total: page.expected_members,
+                                received: 0,
+                                after_member: 0,
+                            })
+                            || s.through != page.base
+                            || s.tail_at_head
+                        {
+                            return Err(SyncError::Invalid.into());
+                        }
+                        stage = Some(s);
+                    }
+                    stage_base(
+                        port,
+                        stage.as_mut().ok_or(SyncError::Invalid)?,
+                        page,
+                        progress,
+                    )
+                    .await?;
+                }
+                ReadOutcome::Expired(v) => {
+                    if !restart(port, &mut stage, v, &mut requested, restarts).await? {
+                        return Ok(false);
+                    }
+                }
+                ReadOutcome::LegacyExpired => return Err(SyncError::Invalid.into()),
             }
         }
-    }
-    impl ReplicaPort for UnitPort {
-        type Error = SyncError;
-        type Pending = usize;
-        type Receipt = ();
-        type Page = u64;
-
-        async fn claim(&self) -> Result<Vec<usize>, SyncError> {
-            self.upload_calls.set(self.upload_calls.get() + 1);
-            Ok((0..self.pending.get()).collect())
-        }
-        async fn append(&self, _: &usize) -> Result<(), SyncError> {
-            self.upload_calls.set(self.upload_calls.get() + 1);
-            Ok(())
-        }
-        async fn acknowledge(&self, _: usize, _: ()) -> Result<(), SyncError> {
-            self.upload_calls.set(self.upload_calls.get() + 1);
-            self.pending.set(self.pending.get() - 1);
-            Ok(())
-        }
-        async fn cursor(&self) -> Result<u64, SyncError> {
-            Ok(self.cursor.get())
-        }
-        async fn verified_page(
-            &self,
-            after: u64,
-            limit: usize,
-        ) -> Result<VerifiedPage<u64>, SyncError> {
-            assert_eq!(after, self.cursor.get());
-            assert_eq!(limit, MAX_PAGE_ITEMS);
-            Ok(self.pages.borrow_mut().pop_front().unwrap())
-        }
-        async fn ingest(&self, cursor: u64) -> Result<(), SyncError> {
-            self.ingested.set(self.ingested.get() + 1);
-            self.cursor.set(cursor);
-            Ok(())
-        }
-        async fn caught_up(&self, cursor: u64) -> Result<bool, SyncError> {
-            let complete = self.cursor.get() == cursor && self.pending.get() == 0;
-            if complete {
-                self.freshness_marks.set(self.freshness_marks.get() + 1);
-            }
-            Ok(complete)
-        }
-    }
-    fn page(next_after: u64, entries: usize, has_more: bool) -> VerifiedPage<u64> {
-        VerifiedPage {
-            contents: next_after,
-            next_after,
-            entries,
-            has_more,
-        }
-    }
-    fn complete<T>(future: impl Future<Output = T>) -> T {
-        let mut future = Box::pin(future);
-        match future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(value) => value,
-            Poll::Pending => panic!("pure unit port futures complete immediately"),
-        }
-    }
-
-    #[test]
-    fn inbox_head_with_pending_uploads_does_not_claim_or_establish_full_freshness() {
-        let port = UnitPort::new(1, vec![page(1, 1, true), page(2, 1, false)]);
-        let progress = complete(reconcile_inbox(&port)).unwrap();
-        assert_eq!(progress.uploaded, 0);
-        assert_eq!(progress.received, 2);
-        assert_eq!(progress.cursor, 2);
-        assert!(progress.inbox_at_head);
-        assert!(!progress.caught_up);
-        assert_eq!(port.pending.get(), 1);
-        assert_eq!(port.upload_calls.get(), 0);
-        assert_eq!(port.freshness_marks.get(), 0);
-    }
-
-    #[test]
-    fn full_reconcile_uploads_before_using_the_same_inbox_use_case() {
-        let port = UnitPort::new(1, vec![page(2, 2, false)]);
-        let progress = complete(reconcile(&port)).unwrap();
-        assert_eq!(progress.uploaded, 1);
-        assert_eq!(progress.received, 2);
-        assert!(progress.inbox_at_head && progress.caught_up);
-        assert_eq!(port.upload_calls.get(), 3);
-        assert_eq!(port.freshness_marks.get(), 1);
-    }
-
-    #[test]
-    fn inbox_budget_retains_more_history_without_marking_freshness() {
-        let mut pages = (1..=MAX_PULL_PAGES)
-            .map(|index| page((index * MAX_PAGE_ITEMS) as u64, MAX_PAGE_ITEMS, true))
-            .collect::<Vec<_>>();
-        let head = (MAX_PULL_PAGES * MAX_PAGE_ITEMS) as u64;
-        pages.push(page(head, 0, false));
-        let port = UnitPort::new(1, pages);
-        let progress = complete(reconcile_inbox(&port)).unwrap();
-        assert_eq!(progress.cursor, head);
-        assert_eq!(progress.received, MAX_PULL_PAGES * MAX_PAGE_ITEMS);
-        assert!(!progress.inbox_at_head && !progress.caught_up);
-        assert_eq!(port.ingested.get(), MAX_PULL_PAGES);
-        assert_eq!(port.pages.borrow().len(), 1);
-        let next = complete(reconcile_inbox(&port)).unwrap();
-        assert!(next.inbox_at_head && !next.caught_up);
-        assert_eq!(port.upload_calls.get(), 0);
-        assert_eq!(port.freshness_marks.get(), 0);
-    }
-
-    #[test]
-    fn invalid_page_is_rejected_before_ingest_or_freshness() {
-        let port = UnitPort::new(1, vec![page(3, 1, false)]);
-        assert!(matches!(
-            complete(reconcile_inbox(&port)),
-            Err(SyncError::Invalid)
-        ));
-        assert_eq!(port.cursor.get(), 0);
-        assert_eq!(port.ingested.get(), 0);
-        assert_eq!(port.freshness_marks.get(), 0);
-    }
-
-    #[test]
-    fn oversized_upload_claim_is_rejected_before_any_append() {
-        let port = UnitPort::new(MAX_UPLOADS + 1, Vec::new());
-        assert!(matches!(
-            complete(reconcile(&port)),
-            Err(SyncError::Invalid)
-        ));
-        assert_eq!(port.upload_calls.get(), 1);
-        assert_eq!(port.pending.get(), MAX_UPLOADS + 1);
-        assert_eq!(port.ingested.get(), 0);
-    }
-
-    #[test]
-    fn a_page_cannot_skip_history_or_claim_more_without_progress() {
-        let page = |next_after, entries, has_more| VerifiedPage {
-            contents: (),
-            next_after,
-            entries,
-            has_more,
-        };
-        assert!(page(2, 2, true).validate_after(0).is_ok());
-        assert!(page(2, 0, false).validate_after(2).is_ok());
-        assert!(page(2, 0, true).validate_after(2).is_err());
-        assert!(page(3, 2, false).validate_after(0).is_err());
-        assert!(
-            page(MAX_PAGE_ITEMS as u64, MAX_PAGE_ITEMS, true)
-                .validate_after(0)
-                .is_ok()
-        );
-        assert!(
-            page(MAX_PAGE_ITEMS as u64 + 1, MAX_PAGE_ITEMS + 1, false)
-                .validate_after(0)
-                .is_err()
-        );
-        assert!(
-            page(MAX_REVISION + 1, 1, false)
-                .validate_after(MAX_REVISION)
-                .is_err()
-        );
     }
 }
+async fn stage_base<P: CheckpointPort>(
+    port: &P,
+    stage: &mut ActiveStage<P::Stage, P::Guard>,
+    page: VerifiedBasePage<P::BaseContents>,
+    progress: &mut Progress,
+) -> Result<(), P::Error> {
+    let next = stage.base.advance(
+        page.base,
+        page.expected_members,
+        &page.sequences,
+        page.next_member,
+        page.has_more,
+    )?;
+    progress.received += page.sequences.len();
+    port.stage_page(&stage.stage, page).await?;
+    stage.base = next;
+    Ok(())
+}
+async fn restart<P: CheckpointPort>(
+    port: &P,
+    stage: &mut Option<ActiveStage<P::Stage, P::Guard>>,
+    history: HistoryVersion,
+    requested: &mut Option<HistoryVersion>,
+    restarts: &mut usize,
+) -> Result<bool, P::Error> {
+    history.validate()?;
+    if let Some(s) = stage.take() {
+        port.checkpoint_discard(s.stage).await?;
+    }
+    if *restarts >= 1 {
+        return Ok(false);
+    }
+    *restarts += 1;
+    *requested = Some(history);
+    Ok(true)
+}
+#[cfg(test)]
+mod tests;
