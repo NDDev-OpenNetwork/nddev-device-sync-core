@@ -16,17 +16,12 @@ central standards.
 
 ## Standards compatibility
 
-The identity slice adopts `v0.0.1-alpha.9`
-(`16a477beac6127adf73ef102df74a48451d607f1`). ADR 0003 introduces email OTP
-and GitHub PKCE as explicit sign-in bindings for one owner. Product identity
-use cases are consumed by the server through an immutable core source pin.
+`standarts.lock` selects the immutable central contract for this source. Consumers
+update explicit Git revisions and qualify one coherent dependency graph; package
+labels alone do not identify the source or establish compatibility.
 
-## API boundary
-
-Core candidate `0.0.1-alpha.9` removes the unconsumed harness account service,
-its account models and memory/keyring adapters. The domain package changes from
-`0.0.1` to `0.0.2`; application changes to `0.0.1-alpha.9`. Consumers update an
-explicit Git revision. Active identity/enrollment rules and module descriptors
-retain their contracts; published protocol schemas and old Git tags are unchanged.
-Product session storage and its native acceptance remain in the accounts module.
-Removing this source does not read, rename or delete existing credential entries.
+Domain rules and application ports remain independent of concrete I/O. Accounts
+owns sessions and protected credentials; Vault owns encryption and local
+durability; Server owns authenticated transactions. Provider runtimes, endpoint
+keys, browser storage and Flutter presentation remain in their owning adapters.
+Pure Core checks do not qualify those runtime paths or authorize live migration.
