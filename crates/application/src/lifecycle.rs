@@ -85,6 +85,24 @@ impl ReplicaSchedule {
         }
     }
 
+    /// Disperse retry phases without changing the exponential state transition.
+    /// Only Retryable varies: 2/4/8/16s +/-1..250ms, and 32s -1..250ms.
+    /// Adapters provide entropy; this policy owns the bounded timing arithmetic.
+    pub fn after_with_sample(&mut self, outcome: BatchOutcome, sample: u16) -> Option<Duration> {
+        let delay = self.after(outcome)?;
+        if !matches!(outcome, BatchOutcome::Retryable) {
+            return Some(delay);
+        }
+        let offset = Duration::from_millis(1 + u64::from(sample & 0x7fff) % 250);
+        Some(
+            if delay == Duration::from_secs(32) || sample & 0x8000 == 0 {
+                delay - offset
+            } else {
+                delay + offset
+            },
+        )
+    }
+
     /// Clear a capacity block only for an explicit manual retry or a verified
     /// capacity remedy. Ordinary lifecycle or success reports cannot clear it.
     pub fn retry_capacity(&mut self) {
@@ -232,5 +250,66 @@ mod tests {
             Some(Duration::from_secs(15))
         );
         assert!(schedule.is_capacity_blocked());
+    }
+}
+
+#[cfg(test)]
+mod retry_sample_tests {
+    use super::*;
+    #[test]
+    fn all_samples_stay_positive_bounded_and_off_integer_phases() {
+        for sample in 0..=u16::MAX {
+            let mut schedule = ReplicaSchedule::default();
+            for base in [2u64, 4, 8, 16, 32, 32] {
+                let delay = schedule
+                    .after_with_sample(BatchOutcome::Retryable, sample)
+                    .unwrap();
+                assert!(delay > Duration::ZERO && delay <= Duration::from_secs(32));
+                assert!(delay >= Duration::from_millis(base * 1000 - 250));
+                assert!(
+                    delay
+                        <= Duration::from_millis(if base == 32 {
+                            32000
+                        } else {
+                            base * 1000 + 250
+                        })
+                );
+                assert_ne!(delay.as_millis() % 1000, 0);
+            }
+        }
+    }
+    #[test]
+    fn state_updates_once_and_other_outcomes_keep_existing_policy() {
+        let mut schedule = ReplicaSchedule::default();
+        let _ = schedule.after_with_sample(BatchOutcome::Retryable, 0);
+        assert_eq!(
+            schedule.after(BatchOutcome::Retryable),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(
+            schedule.after_with_sample(BatchOutcome::CapacityExhausted, u16::MAX),
+            Some(Duration::from_secs(15))
+        );
+        assert!(schedule.is_capacity_blocked());
+        assert_eq!(
+            schedule.after_with_sample(BatchOutcome::CatchingUp, 0),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            schedule.after_with_sample(BatchOutcome::InboxMore, 0),
+            Some(Duration::from_millis(200))
+        );
+        assert_eq!(
+            schedule.after_with_sample(BatchOutcome::InboxHead, 0),
+            Some(Duration::from_secs(15))
+        );
+        assert!(schedule.is_capacity_blocked());
+        assert_eq!(schedule.after_with_sample(BatchOutcome::Locked, 0), None);
+        schedule.retry_capacity();
+        assert_eq!(
+            schedule.after_with_sample(BatchOutcome::CaughtUp, 0),
+            Some(Duration::from_secs(15))
+        );
+        assert!(!schedule.is_capacity_blocked());
     }
 }
