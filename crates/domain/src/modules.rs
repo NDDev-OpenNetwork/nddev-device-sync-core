@@ -4,25 +4,33 @@ use crate::{
     sync::MAX_REVISION,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum ModuleError {
     #[error("unsupported_platform")]
     UnsupportedPlatform,
     #[error("provider_unavailable")]
+    #[serde(rename = "provider_unavailable")]
     Unavailable,
     #[error("operation_busy")]
+    #[serde(rename = "operation_busy")]
     Busy,
     #[error("invalid_input")]
     InvalidInput,
     #[error("operation_timeout")]
+    #[serde(rename = "operation_timeout")]
     Timeout,
     #[error("operation_cancelled")]
+    #[serde(rename = "operation_cancelled")]
     Cancelled,
     #[error("provider_failed")]
     ProviderFailed,
     #[error("invalid_response")]
     InvalidResponse,
     #[error("invalid_module_contract")]
+    #[serde(rename = "invalid_module_contract")]
     InvalidContract,
 }
 

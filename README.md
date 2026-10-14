@@ -7,17 +7,21 @@ belong to `nddev-device-sync-accounts`. Core contains no concrete I/O, estate
 data or production endpoints.
 
 The desktop, mobile, server and agent repositories consume this core through
-pinned releases and the protocol repository. The core has no UI dependency and
+explicit Git revisions and the protocol repository. The core has no UI dependency and
 no knowledge of the private self-hosted estate.
 
 Module descriptors belong to their implementing adapters. The native agent
 composes their manifests through the domain graph; core contains no parallel
 assembly registry or claims about installed provider capabilities.
 
-`application::replica::reconcile` owns one bounded client upload/catch-up batch.
-`reconcile_inbox` reuses the same pull path without claiming local uploads.
+`domain::sync::history` owns operation metadata, retained-history bounds and
+checkpoint validation. `application::replica::reconcile_history` owns one bounded
+upload, inbox and checkpoint recovery batch. `reconcile` and `reconcile_inbox`
+use that same path; the inbox-only call does not claim local uploads.
 Its `inbox_at_head` observation is separate from full `caught_up`: pending work
 still prevents the adapter's atomic freshness mark.
+Persisted writer facts describe the negotiated format and observed history;
+they never grant authorization or replace an uncertain dispatched operation.
 The vault adapter supplies its existing immutable claims, authenticated transport,
 payload verification and atomic journal commands. It retains concrete storage,
 cryptography, key access and request encoding; core contains no SQL or wire DTOs.
@@ -26,6 +30,11 @@ desktop/web window losing input focus can continue bounded work; hidden clients
 and mobile background restrictions retain their existing boundary. Adapters own
 the actual tasks, deadlines and cancellation, and identity remains the existing
 accounts boundary.
+
+`repositories::catalog::observations` defines bounded positive repository
+observations and prepares candidates from a scoped scan and existing metadata.
+It performs no Git or database writes. A partial scan cannot imply absence or
+authorize deletion; provider and publication adapters own those I/O boundaries.
 
 Sync pages retain the protocol's 100-item ceiling and the caller's requested
 limit. Server adapters must also enforce `MAX_PAGE_BYTES` on the encoded JSON

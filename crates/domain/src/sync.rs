@@ -1,9 +1,12 @@
 //! Pure operation validation and revision/conflict decisions. Storage commits
 //! authorization, entity state, log position and the original result atomically.
+pub mod history;
 use crate::{DeviceId, valid_identifier};
 
 pub const MAX_REVISION: u64 = 9_007_199_254_740_991;
 pub const MAX_OPERATION_BYTES: usize = 24 * 1024;
+/// Original stored response bytes; preserves the existing receipt storage cap.
+pub const MAX_RESULT_BYTES: usize = 2 * 1024;
 pub const MAX_PLAIN_BYTES: usize = 16 * 1024;
 pub const MAX_OPERATIONS: u64 = 16_384;
 pub const MAX_STORED_BYTES: u64 = 256 * 1024 * 1024;
@@ -13,13 +16,14 @@ pub const MAX_PAGE_ITEMS: usize = 100;
 /// receipts. Clients retain their separate 64 KiB transport response ceiling.
 pub const MAX_PAGE_BYTES: usize = 60 * 1024;
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub enum EntityKind {
     DeviceState,
     ModuleState,
     VaultRecord,
     AccountState,
     ClipboardItem,
+    RepositoryState,
 }
 
 #[cfg(test)]
@@ -135,6 +139,7 @@ impl EntityKind {
             Self::VaultRecord => "vault_record",
             Self::AccountState => "account_state",
             Self::ClipboardItem => "clipboard_item",
+            Self::RepositoryState => "repository_state",
         }
     }
 }
@@ -231,7 +236,7 @@ impl Receipt {
         }
     }
 }
-fn long_id(value: &str) -> bool {
+pub(crate) fn long_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
         && value
@@ -240,13 +245,21 @@ fn long_id(value: &str) -> bool {
 }
 impl Operation {
     pub fn validate(&self, bytes: usize) -> Result<(), SyncError> {
+        self.validate_header()?;
+        if bytes > MAX_OPERATION_BYTES
+            || !(16..=MAX_PLAIN_BYTES + 16).contains(&self.payload.ciphertext.len())
+        {
+            return Err(SyncError::Invalid);
+        }
+        Ok(())
+    }
+    /// Header validation is available before the adapter encrypts a payload.
+    pub fn validate_header(&self) -> Result<(), SyncError> {
         if !valid_identifier(&self.id)
             || !long_id(&self.entity_id)
             || !long_id(&self.idempotency_key)
             || !valid_identifier(&self.payload.key_id)
             || self.base_revision > MAX_REVISION
-            || bytes > MAX_OPERATION_BYTES
-            || !(16..=MAX_PLAIN_BYTES + 16).contains(&self.payload.ciphertext.len())
         {
             return Err(SyncError::Invalid);
         }
