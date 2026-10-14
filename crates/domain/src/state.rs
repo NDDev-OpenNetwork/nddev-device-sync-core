@@ -18,6 +18,9 @@ pub struct Snapshot {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum State {
+    Repository {
+        observation: crate::repositories::catalog::observations::RepositoryObservation,
+    },
     Device {
         display_name: String,
         platform: String,
@@ -63,8 +66,18 @@ impl Snapshot {
         kind: EntityKind,
         entity: &str,
     ) -> Result<(), SyncError> {
-        if !crate::valid_identifier(entity)
-            || self.schema_version != 1
+        let valid_entity = if kind == EntityKind::RepositoryState {
+            crate::sync::long_id(entity)
+        } else {
+            crate::valid_identifier(entity)
+        };
+        if !valid_entity
+            || self.schema_version
+                != if kind == EntityKind::RepositoryState {
+                    2
+                } else {
+                    1
+                }
             || self.observed_at_ms == 0
             || self.observed_at_ms > MAX_REVISION
         {
@@ -138,12 +151,28 @@ impl Snapshot {
                     && *expires_at_ms > *checked_at_ms
                     && *expires_at_ms <= MAX_REVISION
             }
+            (State::Repository { observation }, EntityKind::RepositoryState) => {
+                observation.validate().is_ok() && observation.key().entity_id() == entity
+            }
             _ => false,
         };
         if valid {
             Ok(())
         } else {
             Err(SyncError::Invalid)
+        }
+    }
+}
+
+impl Snapshot {
+    /// Material equality excludes observation time and source provenance.
+    /// It does not authorize settlement or conflict retirement.
+    pub fn material_eq(&self, other: &Self) -> bool {
+        match (&self.data, &other.data) {
+            (State::Repository { observation: a }, State::Repository { observation: b }) => {
+                a.material_eq(b)
+            }
+            _ => self.data == other.data,
         }
     }
 }

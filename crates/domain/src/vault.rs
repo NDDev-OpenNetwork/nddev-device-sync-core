@@ -55,15 +55,26 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 impl Record {
+    /// An ordinary edit retains the same entity's verified committed decision.
+    /// Only the owning adapter can supply that authenticated legacy payload.
+    /// This does not promote the legacy watermark into outer lifecycle authority.
+    pub fn inherit_resolution(mut self, committed: &Self) -> Result<Self, SyncError> {
+        self.validate()?;
+        committed.validate()?;
+        self.resolved_through_seq = self
+            .resolved_through_seq
+            .max(committed.resolved_through_seq);
+        if self.resolved_through_seq != 0 {
+            self.version = 2;
+        }
+        Ok(self)
+    }
+
     pub fn validate(&self) -> Result<(), SyncError> {
         if !matches!(self.version, 1 | 2)
             || self.version == 1 && self.resolved_through_seq != 0
             || self.resolved_through_seq > crate::sync::MAX_REVISION
-            || self.title.trim().is_empty()
-            || self.title.chars().count() > 128
-            || self.username.len() > 254
-            || self.secret.len() > crate::sync::MAX_PLAIN_BYTES
-            || self.deleted && !self.secret.is_empty()
+            || !valid_record_fields(self.deleted, &self.title, &self.username, &self.secret)
         {
             return Err(SyncError::Invalid);
         }
@@ -73,6 +84,51 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_legacy_changes_inherit_only_valid_committed_resolution() {
+        let make = |version, resolved, deleted| Record {
+            version,
+            deleted,
+            title: "Record".into(),
+            username: String::new(),
+            secret: Zeroizing::new(if deleted {
+                String::new()
+            } else {
+                "generated".into()
+            }),
+            resolved_through_seq: resolved,
+        };
+        let committed = make(2, 7, false);
+        let edit = make(1, 0, false).inherit_resolution(&committed).unwrap();
+        assert_eq!((edit.version, edit.resolved_through_seq), (2, 7));
+        let deleted = make(1, 0, true).inherit_resolution(&committed).unwrap();
+        assert_eq!((deleted.version, deleted.resolved_through_seq), (2, 7));
+        assert!(deleted.deleted && deleted.secret.is_empty());
+        assert_eq!(
+            make(2, 9, false)
+                .inherit_resolution(&committed)
+                .unwrap()
+                .resolved_through_seq,
+            9
+        );
+        assert_eq!(
+            make(1, 0, false)
+                .inherit_resolution(&make(1, 0, false))
+                .unwrap()
+                .version,
+            1
+        );
+        assert!(
+            make(1, 0, false)
+                .inherit_resolution(&make(1, 7, false))
+                .is_err()
+        );
+        assert!(
+            make(1, 0, false)
+                .inherit_resolution(&make(2, crate::sync::MAX_REVISION + 1, false))
+                .is_err()
+        );
+    }
     #[test]
     fn retained_records_and_explicit_resolution_have_distinct_versioned_bounds() {
         let mut record = Record {
@@ -96,4 +152,34 @@ mod tests {
         record.secret.clear();
         assert!(record.validate().is_ok());
     }
+}
+
+/// New plaintext carries no second resolution declaration. Legacy Record1/2
+/// above retain their exact decoding and authenticated ciphertext semantics.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Record3 {
+    pub version: u8,
+    pub deleted: bool,
+    pub title: String,
+    pub username: String,
+    pub secret: Zeroizing<String>,
+}
+impl Record3 {
+    pub fn validate(&self) -> Result<(), SyncError> {
+        if self.version != 3
+            || !valid_record_fields(self.deleted, &self.title, &self.username, &self.secret)
+        {
+            Err(SyncError::Invalid)
+        } else {
+            Ok(())
+        }
+    }
+}
+fn valid_record_fields(deleted: bool, title: &str, username: &str, secret: &str) -> bool {
+    !title.trim().is_empty()
+        && title.chars().count() <= 128
+        && username.len() <= 254
+        && secret.len() <= crate::sync::MAX_PLAIN_BYTES
+        && (!deleted || secret.is_empty())
 }
