@@ -19,6 +19,8 @@ use std::future::Future;
 
 pub struct EndpointClaim {
     pub endpoint: [u8; 32],
+    /// A new endpoint instance generates this once; lost-ACK retries retain it.
+    pub instance_id: [u8; 16],
     pub base_revision: u64,
     pub nonce: String,
     pub expires_at_ms: u64,
@@ -45,30 +47,50 @@ pub fn validate_endpoint_claim(
     {
         return Err(ScreenError::Denied);
     }
-    let base = current.map_or(0, |binding| binding.revision);
-    if base != claim.base_revision
-        || base >= MAX_REVISION
-        || current.is_some_and(|binding| binding.device != device.id || binding.revision == 0)
+    if claim.instance_id.iter().all(|byte| *byte == 0)
+        || current.is_some_and(|binding| {
+            binding.device != device.id
+                || binding.revision == 0
+                || binding.revision > MAX_REVISION
+                || binding.instance_id.iter().all(|byte| *byte == 0)
+        })
     {
         return Err(ScreenError::Denied);
     }
+    // A retry is identified by the exact instance AND immutable key/base.
+    // Every attempt still authenticates fresh NDS context and fresh endpoint PoP.
+    let revision = match current {
+        Some(binding) if binding.instance_id == claim.instance_id => {
+            if binding.endpoint != claim.endpoint
+                || binding.revision.checked_sub(1) != Some(claim.base_revision)
+            {
+                return Err(ScreenError::Denied);
+            }
+            binding.revision
+        }
+        _ => {
+            let base = current.map_or(0, |binding| binding.revision);
+            if base != claim.base_revision || base >= MAX_REVISION {
+                return Err(ScreenError::Denied);
+            }
+            base + 1
+        }
+    };
     let bytes = endpoint_signing_bytes(
         configured_origin,
         &signed.device,
         &claim.endpoint,
-        base,
+        &claim.instance_id,
+        claim.base_revision,
         &claim.nonce,
         claim.expires_at_ms,
     )
     .map_err(ScreenError::Module)?;
-    // Fresh registration creates/retires an endpoint/host instance even when
-    // its purpose key is unchanged. Idempotent retry returns the original
-    // canonical result before this transition; observations do not call bind.
-    let revision = base + 1;
     Ok((
         EndpointBinding {
             device: device.id.clone(),
             endpoint: claim.endpoint,
+            instance_id: claim.instance_id,
             revision,
         },
         bytes,
@@ -263,7 +285,12 @@ pub fn native_grant_payload(bytes: &[u8]) -> Result<(), ScreenError> {
 /// reference is not a wire/presentation field. Binding also
 /// verifies the actual endpoint PoP/key, origin/transcript and endpoint uniqueness.
 /// A NEW endpoint/host instance registers a fresh proof and advances the
-/// existing binding revision even with the same key; heartbeat/unchanged
+/// existing binding revision even with the same key and a NEW instance UUID.
+/// A retry retains exact instance UUID/key/original base while refreshing the
+/// signed nonce/expiry and endpoint proof. Consume nonce and verify both proofs
+/// before returning the same current row; no revision/intent mutation on replay.
+/// Changed key/base with the same id conflicts. A replaced row cannot replay its
+/// old original base. No historical id/result registry is needed. Heartbeat/unchanged
 /// observations do not call bind. Old live intents retire. Create uses a unique
 /// view id <=64 bytes, never reused after End/restart. Native tenant is that id
 /// and native policy_revision is the host binding revision; no epoch registry.
@@ -385,11 +412,13 @@ mod tests {
                 viewer_binding: EndpointBinding {
                     device: viewer.id.clone(),
                     endpoint: [3; 32],
+                    instance_id: [3; 16],
                     revision: 1,
                 },
                 host_binding: EndpointBinding {
                     device: host.id.clone(),
                     endpoint: [4; 32],
+                    instance_id: [4; 16],
                     revision: 2,
                 },
                 viewer,
@@ -424,6 +453,7 @@ mod tests {
         fn claim(&self) -> EndpointClaim {
             EndpointClaim {
                 endpoint: [3; 32],
+                instance_id: [9; 16],
                 base_revision: 0,
                 nonce: self.signed.nonce.clone(),
                 expires_at_ms: self.signed.expires_at_ms,
@@ -457,6 +487,7 @@ mod tests {
                 "https://control.invalid",
                 &c.signed.device,
                 &[3; 32],
+                &[9; 16],
                 0,
                 &c.signed.nonce,
                 60000
@@ -714,6 +745,61 @@ mod tests {
         assert!(native_grant_payload(&[1]).is_ok());
         assert!(native_grant_payload(&[]).is_err());
         assert!(native_grant_payload(&vec![0; 8193]).is_err());
+    }
+    #[test]
+    fn lost_ack_retry_with_fresh_nonce_returns_original_binding() {
+        let mut c = Case::new();
+        let (first, _) = c.binding(c.claim(), None).unwrap();
+        c.signed.nonce = "screen_nonce_0002".into();
+        c.signed.expires_at_ms = 61000;
+        // Same logical registration and base, new legal signed context/PoP.
+        let (retry, _) = c.binding(c.claim(), Some(&first)).unwrap();
+        assert_eq!(retry.revision, first.revision);
+        assert_eq!(retry.endpoint, first.endpoint);
+    }
+    #[test]
+    fn registration_id_distinguishes_retry_restart_and_mismatch() {
+        let mut c = Case::new();
+        let (first, _) = c.binding(c.claim(), None).unwrap();
+        c.signed.nonce = "screen_nonce_0002".into();
+        c.signed.expires_at_ms = 61000;
+        let (retry, proof) = c.binding(c.claim(), Some(&first)).unwrap();
+        assert_eq!(retry.instance_id, first.instance_id);
+        assert_eq!(retry.revision, 1);
+        // Fresh transcript includes new nonce/expiry and the stable instance id.
+        let original = core_proof(&c, &first, "screen_nonce_0001", 60000);
+        assert_ne!(proof, original);
+        let mut changed = c.claim();
+        changed.endpoint = [5; 32];
+        assert!(c.binding(changed, Some(&first)).is_err());
+        let mut changed = c.claim();
+        changed.base_revision = 1;
+        assert!(c.binding(changed, Some(&first)).is_err());
+        let mut restart = c.claim();
+        restart.instance_id = [8; 16];
+        assert!(c.binding(restart, Some(&first)).is_err()); // old base is not CAS
+        let mut restart = c.claim();
+        restart.instance_id = [8; 16];
+        restart.base_revision = 1;
+        let (next, _) = c.binding(restart, Some(&first)).unwrap();
+        assert_eq!(next.endpoint, first.endpoint);
+        assert_eq!(next.revision, 2);
+        assert_ne!(next.instance_id, first.instance_id);
+        assert!(c.binding(c.claim(), Some(&next)).is_err()); // superseded lost ACK
+        c.auth.session.expires_at_ms = 1500;
+        assert!(c.binding(c.claim(), Some(&first)).is_err()); // replay cannot bypass auth
+    }
+    fn core_proof(c: &Case, binding: &EndpointBinding, nonce: &str, expiry: u64) -> Vec<u8> {
+        endpoint_signing_bytes(
+            "https://control.invalid",
+            &c.signed.device,
+            &binding.endpoint,
+            &binding.instance_id,
+            0,
+            nonce,
+            expiry,
+        )
+        .unwrap()
     }
 }
 
