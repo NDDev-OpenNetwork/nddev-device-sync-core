@@ -4,6 +4,8 @@
 use nddev_device_sync_domain::{modules::ModuleError, repositories::catalog::*};
 use std::future::Future;
 
+pub mod observations;
+
 /// Browser futures may remain local; native adapters supply their Send future.
 pub trait ReadGithubCatalogPage {
     type Error: From<ModuleError>;
