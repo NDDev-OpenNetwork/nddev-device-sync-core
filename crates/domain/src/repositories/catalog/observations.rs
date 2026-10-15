@@ -245,7 +245,9 @@ impl RepositoryObservation {
         }
         match (&self.data, &other.data) {
             (ObservationData::ScopeScan { scan: a }, ObservationData::ScopeScan { scan: b }) => {
-                a.material_eq(b)
+                // A scan describes access through this exact selected credential
+                // version; equal counts do not make a replacement scope equal.
+                self.source.context.selection == other.source.context.selection && a.material_eq(b)
             }
             _ => self.data == other.data,
         }

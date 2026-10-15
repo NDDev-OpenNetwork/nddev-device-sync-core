@@ -565,3 +565,42 @@ fn owner_scope_actual_codec_boundaries_and_unchanged_complete_times() {
         println!("max_{name}_snapshot_bytes={}", encoded.len());
     }
 }
+
+#[test]
+fn equal_scope_counts_under_a_replacement_credential_require_a_new_observation() {
+    let old = RepositoryObservation {
+        source: ObservationSource {
+            context: context("before"),
+            page: None,
+        },
+        data: ObservationData::ScopeScan {
+            scan: ScopeScan {
+                outcome: TraversalOutcome::Complete,
+                pages: 1,
+                repositories: 1,
+                last_complete: Some(CompleteTraversal {
+                    pages: 1,
+                    repositories: 1,
+                    observed_at_ms: 10,
+                    scan_id: "before".into(),
+                }),
+            },
+        },
+    };
+    let mut fresh = old.clone();
+    fresh.source.context.selection =
+        CredentialSelection::new("credential".into(), 2, None).unwrap();
+    fresh.source.context.scan_id = "after".into();
+    assert_eq!(old.key(), fresh.key());
+    assert!(!old.material_eq(&fresh));
+    assert!(matches!(
+        capture(fresh.clone(), 1)
+            .decide(&target(&old, 1), Some(&fresh.source.context))
+            .unwrap(),
+        PublicationDecision::Write(_)
+    ));
+    let fact = repo(1, 1, "same-fact", "before");
+    let mut other_source = fact.clone();
+    other_source.source.context = fresh.source.context;
+    assert!(fact.material_eq(&other_source));
+}

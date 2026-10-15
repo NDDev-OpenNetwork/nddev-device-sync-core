@@ -23,6 +23,7 @@ pub struct PreparedPage {
     pub has_more: bool,
     pub candidates: Vec<Candidate>,
     provider_page: RepositoryPage,
+    scope_capture: Capture,
 }
 impl PreparedPage {
     /// Only the validated provider page can mint this continuation.
@@ -73,6 +74,55 @@ impl PagePublication {
     /// owner until the last candidate has a durable/unchanged receipt.
     pub fn completed_page(&self) -> Option<&PreparedPage> {
         (self.accepted == self.page.candidates.len()).then_some(&self.page)
+    }
+    /// Intermediate pages do not churn a durable scan status. A terminal page
+    /// needs its previous saved evidence before the caller publishes a summary.
+    pub fn terminal_scope_key(&self) -> Option<ObservationKey> {
+        let page = self.completed_page()?;
+        page.next_cursor()
+            .is_none()
+            .then(|| scope_key(&page.context))
+    }
+    /// Return tentative traversal progress. The caller installs it together with
+    /// the continuation only after the optional summary has a durable/no-op receipt.
+    pub fn finish(
+        &self,
+        mut traversal: Traversal,
+        previous: Option<&RepositoryObservation>,
+    ) -> Result<(Traversal, Option<Candidate>), ModuleError> {
+        let page = self.completed_page().ok_or(ModuleError::Busy)?;
+        traversal.accept(page)?;
+        let Some(key) = self.terminal_scope_key() else {
+            return Ok((traversal, None));
+        };
+        let previous = match previous {
+            Some(value) => {
+                value.validate()?;
+                if value.key() != key {
+                    return Err(ModuleError::InvalidInput);
+                }
+                // A replacement credential may have a different access scope.
+                // Saved completion under its old version is not current evidence.
+                (value.source.context.selection == page.context.selection).then_some(value)
+            }
+            None => None,
+        };
+        let scan = traversal.summary(None, previous, page.observed_at_ms)?;
+        let candidate = page.scope_capture.clone().confirm(RepositoryObservation {
+            source: ObservationSource {
+                context: page.context.clone(),
+                page: None,
+            },
+            data: ObservationData::ScopeScan { scan },
+        })?;
+        Ok((traversal, Some(candidate)))
+    }
+}
+
+fn scope_key(context: &ObservationContext) -> ObservationKey {
+    ObservationKey::Scope {
+        principal: context.principal,
+        record_ref: context.selection.record_ref().into(),
     }
 }
 pub async fn observation_page<P: ReadObservationBaselines>(
@@ -149,6 +199,10 @@ pub async fn observation_page<P: ReadObservationBaselines>(
                 .confirm(value)
         })
         .collect::<Result<Vec<_>, ModuleError>>()?;
+    let key = scope_key(&context);
+    let scope_capture = captures
+        .remove(&key)
+        .unwrap_or(Capture::before_read(key, TargetVersion::absent())?);
     Ok(PreparedPage {
         context,
         page: request.page(),
@@ -157,10 +211,12 @@ pub async fn observation_page<P: ReadObservationBaselines>(
         has_more: !matches!(page.continuation, CatalogContinuation::EndOfAccessScope),
         candidates,
         provider_page: page,
+        scope_capture,
     })
 }
 /// Transient bounded traversal evidence, not a durable registry or scheduler.
 /// Order-independent page receipt does not imply deletion or an atomic snapshot.
+#[derive(Clone)]
 pub struct Traversal {
     context: ObservationContext,
     pages: BTreeMap<u8, (Vec<RepositoryId>, bool)>,

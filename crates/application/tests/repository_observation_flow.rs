@@ -39,15 +39,29 @@ impl ReadObservationBaselines for PageInputs {
     ) -> impl Future<Output = Result<Vec<(ObservationKey, TargetVersion)>, ModuleError>> {
         self.log.borrow_mut().push("baseline");
         std::future::ready(Ok(if self.mutate_during_read {
-            vec![(
-                ObservationKey::Repository(RepositoryId::new(1).unwrap()),
-                TargetVersion {
-                    revision: self.version.get(),
-                    next_base: self.version.get(),
-                    pending_id: None,
-                    conflicted: false,
-                },
-            )]
+            vec![
+                (
+                    ObservationKey::Repository(RepositoryId::new(1).unwrap()),
+                    TargetVersion {
+                        revision: self.version.get(),
+                        next_base: self.version.get(),
+                        pending_id: None,
+                        conflicted: false,
+                    },
+                ),
+                (
+                    ObservationKey::Scope {
+                        principal: GithubAccountId::new(1).unwrap(),
+                        record_ref: "credential".into(),
+                    },
+                    TargetVersion {
+                        revision: self.version.get(),
+                        next_base: self.version.get(),
+                        pending_id: None,
+                        conflicted: false,
+                    },
+                ),
+            ]
         } else {
             vec![]
         }))
@@ -434,4 +448,160 @@ fn prior_complete_is_bound_to_existing_scope_wrapper_not_an_unscoped_scan() {
     let mut older = wrapper;
     older.source.context.scan_id = "previous-flight".into();
     assert!(partial.summary(None, Some(&older), 11).is_ok());
+}
+
+fn acknowledge_all(publication: &mut PagePublication) {
+    while let Some(candidate) = publication.next_candidate() {
+        let key = candidate.observation().key();
+        publication.acknowledge(&key).unwrap();
+    }
+}
+
+#[test]
+fn terminal_summary_requires_all_page_receipts_and_intermediate_pages_do_not_write_it() {
+    let pages = prepared_pages();
+    let mut traversal = Traversal::new(pages[0].context.clone()).unwrap();
+    let mut terminal = None;
+    for (index, page) in pages.into_iter().enumerate() {
+        let mut publication = PagePublication::new(page);
+        assert!(publication.terminal_scope_key().is_none());
+        assert!(matches!(
+            publication.finish(traversal.clone(), None),
+            Err(ModuleError::Busy)
+        ));
+        acknowledge_all(&mut publication);
+        let (accepted, candidate) = publication.finish(traversal, None).unwrap();
+        traversal = accepted;
+        assert_eq!(candidate.is_some(), index == 63);
+        assert_eq!(publication.terminal_scope_key().is_some(), index == 63);
+        terminal = candidate;
+    }
+    let candidate = terminal.unwrap();
+    let ObservationData::ScopeScan { scan } = &candidate.observation().data else {
+        panic!()
+    };
+    assert_eq!(scan.outcome, TraversalOutcome::Complete);
+    assert_eq!(scan.pages, 64);
+    assert_eq!(scan.repositories, 1600);
+    // Repeated equivalent completion retains saved evidence without clock churn.
+    let mut prior = candidate.observation().clone();
+    prior.source.context.scan_id = "older-scan".into();
+    if let ObservationData::ScopeScan { scan } = &mut prior.data {
+        scan.last_complete.as_mut().unwrap().scan_id = "older-scan".into();
+    }
+    let current = ObservedTarget {
+        key: prior.key(),
+        version: TargetVersion {
+            revision: 1,
+            next_base: 1,
+            pending_id: None,
+            conflicted: false,
+        },
+        value: Some(prior),
+        history_cursor: 1,
+    };
+    let context = candidate.observation().source.context.clone();
+    assert!(matches!(
+        candidate.decide(&current, Some(&context)).unwrap(),
+        PublicationDecision::Noop
+    ));
+}
+
+#[test]
+fn partial_terminal_preserves_prior_completion_only_for_the_same_credential_version() {
+    let page = prepared_pages().pop().unwrap();
+    let context = page.context.clone();
+    let old_complete = CompleteTraversal {
+        pages: 3,
+        repositories: 50,
+        observed_at_ms: 1,
+        scan_id: "earlier".into(),
+    };
+    let mut previous = RepositoryObservation {
+        source: ObservationSource {
+            context: context.clone(),
+            page: None,
+        },
+        data: ObservationData::ScopeScan {
+            scan: ScopeScan {
+                outcome: TraversalOutcome::Complete,
+                pages: 3,
+                repositories: 50,
+                last_complete: Some(old_complete.clone()),
+            },
+        },
+    };
+    let mut publication = PagePublication::new(page);
+    acknowledge_all(&mut publication);
+    let (_, candidate) = publication
+        .finish(Traversal::new(context.clone()).unwrap(), Some(&previous))
+        .unwrap();
+    let candidate = candidate.unwrap();
+    let ObservationData::ScopeScan { scan } = &candidate.observation().data else {
+        panic!()
+    };
+    assert_eq!(scan.outcome, TraversalOutcome::Partial);
+    assert_eq!(scan.last_complete, Some(old_complete));
+    previous.source.context.selection =
+        CredentialSelection::new("credential".into(), 1, None).unwrap();
+    let (_, candidate) = publication
+        .finish(Traversal::new(context.clone()).unwrap(), Some(&previous))
+        .unwrap();
+    let candidate = candidate.unwrap();
+    let ObservationData::ScopeScan { scan } = &candidate.observation().data else {
+        panic!()
+    };
+    assert!(scan.last_complete.is_none());
+    previous.source.context.principal = GithubAccountId::new(2).unwrap();
+    assert!(
+        publication
+            .finish(Traversal::new(context).unwrap(), Some(&previous))
+            .is_err()
+    );
+}
+
+#[test]
+fn terminal_summary_uses_the_scope_version_captured_before_provider_io() {
+    let input = PageInputs {
+        raw: RefCell::new(Some(raw(1, 1, false))),
+        log: RefCell::new(vec![]),
+        version: Cell::new(0),
+        mutate_during_read: true,
+    };
+    let page = run(observation_page(
+        &input,
+        selection(),
+        None,
+        "scan".into(),
+        &(),
+    ))
+    .unwrap();
+    let context = page.context.clone();
+    let mut publication = PagePublication::new(page);
+    acknowledge_all(&mut publication);
+    let (_, candidate) = publication
+        .finish(Traversal::new(context.clone()).unwrap(), None)
+        .unwrap();
+    let candidate = candidate.unwrap();
+    assert_eq!(input.version.get(), 1);
+    assert_eq!(candidate.expected().revision, 0);
+    let mut newer = candidate.observation().clone();
+    if let ObservationData::ScopeScan { scan } = &mut newer.data {
+        scan.outcome = TraversalOutcome::Failed(ModuleError::Timeout);
+    }
+    let current = ObservedTarget {
+        key: newer.key(),
+        version: TargetVersion {
+            revision: 1,
+            next_base: 1,
+            pending_id: None,
+            conflicted: false,
+        },
+        value: Some(newer),
+        history_cursor: 1,
+    };
+    assert!(matches!(
+        candidate.decide(&current, Some(&context)).unwrap(),
+        PublicationDecision::ReRead
+    ));
 }

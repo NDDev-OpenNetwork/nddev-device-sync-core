@@ -165,7 +165,8 @@ impl Snapshot {
 }
 
 impl Snapshot {
-    /// Material equality excludes observation time and source provenance.
+    /// Material equality excludes observation time and scan markers. Scope
+    /// summaries still bind their evidence to the selected credential version.
     /// It does not authorize settlement or conflict retirement.
     pub fn material_eq(&self, other: &Self) -> bool {
         match (&self.data, &other.data) {
