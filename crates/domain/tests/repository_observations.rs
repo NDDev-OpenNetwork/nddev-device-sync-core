@@ -730,3 +730,42 @@ fn a_retained_equal_receipt_can_require_fresh_evidence_for_its_whole_family() {
     current.version.pending_id = Some("later-intent".into());
     assert!(!guard.matches(&current));
 }
+
+#[test]
+fn a_pending_original_behind_the_committed_head_is_preserved_without_rebasing_it() {
+    let old = repo(9, 2, "pending", "old-scan");
+    let original = operation(&capture(old.clone(), 0), "old-original");
+    let receipt = Receipt {
+        operation_id: original.operation.id.clone(),
+        server_seq: 10,
+        decision: Decision::Conflict {
+            base_revision: 0,
+            current_revision: 1,
+        },
+    };
+    let mut current = target(&repo(9, 3, "committed", "peer-scan"), 1);
+    current.version.next_base = 0;
+    current.version.pending_id = Some("unsent-local-intent".into());
+    current.version.conflicted = true;
+    current.version.validate().unwrap();
+    let read = KnownConflict::restore(old, &original, 100, &receipt)
+        .unwrap()
+        .fresh_read(&current)
+        .unwrap()
+        .unwrap();
+    let fresh = repo(9, 4, "provider-confirmed", "fresh-scan");
+    let ResolutionDecision::Write { candidate, guard } = read
+        .confirm(fresh.clone())
+        .unwrap()
+        .decide(&current, Some(&fresh.source.context))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(candidate.expected().next_base, 0);
+    assert_eq!(guard.resolution_base(), 1);
+    assert_eq!(original.operation.base_revision, 0);
+    assert!(guard.matches(&current));
+    current.version.pending_id = None;
+    assert!(current.version.validate().is_err());
+}

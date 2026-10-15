@@ -272,7 +272,10 @@ impl TargetVersion {
     }
     pub fn validate(&self) -> Result<(), ModuleError> {
         if self.revision > MAX_REVISION
-            || self.next_base < self.revision
+            // A retained pending original may still target an older head after
+            // inbox catch-up. This is a real pending state, not a corrupt row or
+            // permission to rebase its immutable operation.
+            || self.next_base < self.revision && self.pending_id.is_none()
             || self.next_base > MAX_REVISION
             || self
                 .pending_id
@@ -422,6 +425,11 @@ pub struct SettlementGuard {
     pub through_seq: u64,
 }
 impl SettlementGuard {
+    /// A new explicit resolution targets the observed committed head. The old
+    /// pending operation's base remains a separate fact in the comparison guard.
+    pub fn resolution_base(&self) -> u64 {
+        self.version.revision
+    }
     pub fn matches(&self, current: &ObservedTarget) -> bool {
         self.key == current.key
             && self.version == current.version
