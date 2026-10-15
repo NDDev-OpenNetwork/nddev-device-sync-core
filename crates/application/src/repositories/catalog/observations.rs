@@ -14,12 +14,20 @@ pub trait ReadObservationBaselines: ReadGithubCatalogPage {
         &self,
     ) -> impl Future<Output = Result<Vec<(ObservationKey, TargetVersion)>, Self::Error>>;
 }
+#[derive(Clone)]
 pub struct PreparedPage {
     pub context: ObservationContext,
     pub page: u8,
     pub repository_ids: Vec<RepositoryId>,
     pub has_more: bool,
     pub candidates: Vec<Candidate>,
+    next: Option<CatalogCursor>,
+}
+impl PreparedPage {
+    /// Only the validated provider page can mint this continuation.
+    pub fn next_cursor(&self) -> Option<CatalogCursor> {
+        self.next.clone()
+    }
 }
 pub async fn observation_page<P: ReadObservationBaselines>(
     port: &P,
@@ -45,6 +53,10 @@ pub async fn observation_page<P: ReadObservationBaselines>(
     }
     let raw = port.read_page(&request, cancellation).await?;
     let page = raw.into_page(&request)?;
+    let next = match &page.continuation {
+        CatalogContinuation::More(cursor) => Some(cursor.clone()),
+        _ => None,
+    };
     let context = ObservationContext {
         principal: page.principal.id,
         selection: request.selection().clone(),
@@ -99,6 +111,7 @@ pub async fn observation_page<P: ReadObservationBaselines>(
         repository_ids: ids,
         has_more: !matches!(page.continuation, CatalogContinuation::EndOfAccessScope),
         candidates,
+        next,
     })
 }
 /// Transient bounded traversal evidence, not a durable registry or scheduler.

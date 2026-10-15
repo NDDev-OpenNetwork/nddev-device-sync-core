@@ -99,25 +99,33 @@ fn prepared_pages() -> Vec<PreparedPage> {
             version: Cell::new(0),
             mutate_during_read: false,
         };
-        all.push(
-            run(observation_page(
-                &input,
-                selection(),
-                cursor.as_ref(),
-                "scan".into(),
-                &(),
-            ))
-            .unwrap(),
-        );
-        // Continuation is minted by the production pure page contract, not a URL.
-        let request = CatalogPageRequest::new(selection(), cursor.as_ref()).unwrap();
-        let page = raw(n * 25 + 1, 25, n < 63).into_page(&request).unwrap();
-        cursor = match page.continuation {
-            CatalogContinuation::More(v) => Some(v),
-            _ => None,
-        };
+        let prepared = run(observation_page(
+            &input,
+            selection(),
+            cursor.as_ref(),
+            "scan".into(),
+            &(),
+        ))
+        .unwrap();
+        cursor = prepared.next_cursor();
+        all.push(prepared);
     }
     all
+}
+
+#[test]
+fn observation_scan_returns_its_actual_bound_continuation() {
+    let pages = prepared_pages();
+    let next = pages[0].next_cursor().unwrap();
+    let request = CatalogPageRequest::new(selection(), Some(&next)).unwrap();
+    assert_eq!(request.page(), 2);
+    assert_eq!(
+        request.expected_principal(),
+        Some(pages[0].context.principal)
+    );
+    let changed = CredentialSelection::new("different".into(), 1, None).unwrap();
+    assert!(CatalogPageRequest::new(changed, Some(&next)).is_err());
+    assert!(pages.last().unwrap().next_cursor().is_none());
 }
 fn apply(
     page: &PreparedPage,
@@ -266,25 +274,15 @@ fn missing_pages_page_limit_and_source_replacement_never_claim_complete() {
         failed.outcome,
         TraversalOutcome::Failed(ModuleError::Cancelled)
     ));
-    let mut bad = PreparedPage {
-        context: pages[0].context.clone(),
-        page: 1,
-        repository_ids: vec![RepositoryId::new(99).unwrap()],
-        has_more: true,
-        candidates: vec![],
-    };
+    let mut bad = pages[0].clone();
+    bad.repository_ids = vec![RepositoryId::new(99).unwrap()];
     assert!(partial.accept(&bad).is_err());
     bad.context.scan_id = "late-other-scan".into();
     assert!(partial.accept(&bad).is_err());
     let mut limit = Traversal::new(pages[0].context.clone()).unwrap();
     for p in &pages {
-        let mark = PreparedPage {
-            context: p.context.clone(),
-            page: p.page,
-            repository_ids: p.repository_ids.clone(),
-            has_more: true,
-            candidates: vec![],
-        };
+        let mut mark = p.clone();
+        mark.has_more = true;
         limit.accept(&mark).unwrap();
     }
     assert!(matches!(

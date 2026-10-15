@@ -16,6 +16,36 @@ fn context(scan: &str) -> ObservationContext {
         scan_id: scan.into(),
     }
 }
+
+#[test]
+fn stored_observation_ids_roundtrip_without_aliases_or_scope_ambiguity() {
+    for key in [
+        ObservationKey::Owner(GithubAccountId::new(u64::MAX).unwrap()),
+        ObservationKey::Repository(RepositoryId::new(19).unwrap()),
+        ObservationKey::Scope {
+            principal: GithubAccountId::new(7).unwrap(),
+            record_ref: "credential:with:colons".into(),
+        },
+    ] {
+        assert_eq!(ObservationKey::parse(&key.entity_id()).unwrap(), key);
+    }
+    for id in [
+        "github:repo:0",
+        "github:repo:01",
+        "github:repo:+1",
+        "github:owner:18446744073709551616",
+        "gitlab:repo:1",
+        "github:scope:1:01:x",
+        "github:scope:1:2:x",
+        "github:scope:01:1:x",
+        "github:scope:1:0:",
+        "github:scope:1:3:a/b",
+        "github:owner:1:extra",
+    ] {
+        assert!(ObservationKey::parse(id).is_err(), "{id}");
+    }
+    assert!(ObservationKey::parse(&format!("github:scope:1:1024:{}", "x".repeat(1024))).is_err());
+}
 fn repo(id: u64, owner: u64, name: &str, scan: &str) -> RepositoryObservation {
     RepositoryObservation {
         source: ObservationSource {

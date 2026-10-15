@@ -16,6 +16,35 @@ pub enum ObservationKey {
     },
 }
 impl ObservationKey {
+    /// Decode a stored identity without accepting aliases or changing its realm.
+    pub fn parse(value: &str) -> Result<Self, ModuleError> {
+        let invalid = || ModuleError::InvalidInput;
+        if !crate::sync::long_id(value) {
+            return Err(invalid());
+        }
+        let key = if let Some(id) = value.strip_prefix("github:owner:") {
+            Self::Owner(GithubAccountId::new(id.parse().map_err(|_| invalid())?)?)
+        } else if let Some(id) = value.strip_prefix("github:repo:") {
+            Self::Repository(RepositoryId::new(id.parse().map_err(|_| invalid())?)?)
+        } else if let Some(scope) = value.strip_prefix("github:scope:") {
+            let (principal, rest) = scope.split_once(':').ok_or_else(invalid)?;
+            let (length, record_ref) = rest.split_once(':').ok_or_else(invalid)?;
+            if length.parse::<usize>().map_err(|_| invalid())? != record_ref.len() {
+                return Err(invalid());
+            }
+            Self::Scope {
+                principal: GithubAccountId::new(principal.parse().map_err(|_| invalid())?)?,
+                record_ref: record_ref.into(),
+            }
+        } else {
+            return Err(invalid());
+        };
+        key.validate()?;
+        if key.entity_id() != value {
+            return Err(invalid());
+        }
+        Ok(key)
+    }
     pub fn entity_id(&self) -> String {
         match self {
             Self::Owner(id) => format!("github:owner:{}", id.value()),
