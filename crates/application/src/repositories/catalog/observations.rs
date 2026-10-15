@@ -18,6 +18,7 @@ pub trait ReadObservationBaselines: ReadGithubCatalogPage {
 pub struct PreparedPage {
     pub context: ObservationContext,
     pub page: u8,
+    pub observed_at_ms: u64,
     pub repository_ids: Vec<RepositoryId>,
     pub has_more: bool,
     pub candidates: Vec<Candidate>,
@@ -108,6 +109,7 @@ pub async fn observation_page<P: ReadObservationBaselines>(
     Ok(PreparedPage {
         context,
         page: request.page(),
+        observed_at_ms: page.observed_at_ms,
         repository_ids: ids,
         has_more: !matches!(page.continuation, CatalogContinuation::EndOfAccessScope),
         candidates,

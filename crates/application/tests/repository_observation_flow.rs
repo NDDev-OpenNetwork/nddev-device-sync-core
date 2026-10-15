@@ -117,6 +117,7 @@ fn prepared_pages() -> Vec<PreparedPage> {
 fn observation_scan_returns_its_actual_bound_continuation() {
     let pages = prepared_pages();
     let next = pages[0].next_cursor().unwrap();
+    assert_eq!(pages[0].observed_at_ms, 1);
     let request = CatalogPageRequest::new(selection(), Some(&next)).unwrap();
     assert_eq!(request.page(), 2);
     assert_eq!(
