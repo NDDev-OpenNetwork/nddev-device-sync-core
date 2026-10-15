@@ -22,12 +22,57 @@ pub struct PreparedPage {
     pub repository_ids: Vec<RepositoryId>,
     pub has_more: bool,
     pub candidates: Vec<Candidate>,
-    next: Option<CatalogCursor>,
+    provider_page: RepositoryPage,
 }
 impl PreparedPage {
     /// Only the validated provider page can mint this continuation.
     pub fn next_cursor(&self) -> Option<CatalogCursor> {
-        self.next.clone()
+        match &self.provider_page.continuation {
+            CatalogContinuation::More(cursor) => Some(cursor.clone()),
+            _ => None,
+        }
+    }
+    /// The original validated page, used for presentation after publication.
+    pub fn provider_page(&self) -> &RepositoryPage {
+        &self.provider_page
+    }
+}
+
+/// One bounded page awaiting durable publication. The caller retains this owner
+/// across backpressure; only actual unchanged/durable receipts acknowledge a
+/// candidate. Dropping an I/O waiter leaves its candidate available for recheck.
+pub struct PagePublication {
+    page: PreparedPage,
+    accepted: usize,
+}
+impl PagePublication {
+    pub fn new(page: PreparedPage) -> Self {
+        Self { page, accepted: 0 }
+    }
+    pub fn context(&self) -> &ObservationContext {
+        &self.page.context
+    }
+    pub fn observed_at_ms(&self) -> u64 {
+        self.page.observed_at_ms
+    }
+    pub fn next_candidate(&self) -> Option<&Candidate> {
+        self.page.candidates.get(self.accepted)
+    }
+    /// Acknowledge the exact candidate that the I/O caller just accepted.
+    pub fn acknowledge(&mut self, key: &ObservationKey) -> Result<(), ModuleError> {
+        if self
+            .next_candidate()
+            .is_none_or(|c| c.observation().key() != *key)
+        {
+            return Err(ModuleError::InvalidInput);
+        }
+        self.accepted += 1;
+        Ok(())
+    }
+    /// Neither a continuation nor a complete page is available through this
+    /// owner until the last candidate has a durable/unchanged receipt.
+    pub fn completed_page(&self) -> Option<&PreparedPage> {
+        (self.accepted == self.page.candidates.len()).then_some(&self.page)
     }
 }
 pub async fn observation_page<P: ReadObservationBaselines>(
@@ -54,10 +99,6 @@ pub async fn observation_page<P: ReadObservationBaselines>(
     }
     let raw = port.read_page(&request, cancellation).await?;
     let page = raw.into_page(&request)?;
-    let next = match &page.continuation {
-        CatalogContinuation::More(cursor) => Some(cursor.clone()),
-        _ => None,
-    };
     let context = ObservationContext {
         principal: page.principal.id,
         selection: request.selection().clone(),
@@ -69,18 +110,20 @@ pub async fn observation_page<P: ReadObservationBaselines>(
     };
     let mut facts = BTreeMap::new();
     let mut ids = Vec::new();
-    for group in page.groups {
+    for group in &page.groups {
         let owner = RepositoryObservation {
             source: source.clone(),
-            data: ObservationData::Owner { owner: group.owner },
+            data: ObservationData::Owner {
+                owner: group.owner.clone(),
+            },
         };
         facts.insert(owner.key(), owner);
-        for row in group.repositories {
+        for row in &group.repositories {
             ids.push(row.id);
             let observation = RepositoryObservation {
                 source: source.clone(),
                 data: ObservationData::Repository {
-                    repository: RepositoryFact::from_summary(&row)?,
+                    repository: RepositoryFact::from_summary(row)?,
                 },
             };
             if facts.insert(observation.key(), observation).is_some() {
@@ -93,7 +136,7 @@ pub async fn observation_page<P: ReadObservationBaselines>(
     let principal = RepositoryObservation {
         source,
         data: ObservationData::Owner {
-            owner: page.principal,
+            owner: page.principal.clone(),
         },
     };
     facts.entry(principal.key()).or_insert(principal);
@@ -113,7 +156,7 @@ pub async fn observation_page<P: ReadObservationBaselines>(
         repository_ids: ids,
         has_more: !matches!(page.continuation, CatalogContinuation::EndOfAccessScope),
         candidates,
-        next,
+        provider_page: page,
     })
 }
 /// Transient bounded traversal evidence, not a durable registry or scheduler.

@@ -128,6 +128,69 @@ fn observation_scan_returns_its_actual_bound_continuation() {
     assert!(CatalogPageRequest::new(changed, Some(&next)).is_err());
     assert!(pages.last().unwrap().next_cursor().is_none());
 }
+
+#[test]
+fn publication_retains_the_full_page_tail_until_each_candidate_is_acknowledged() {
+    let page = prepared_pages().remove(0);
+    assert_eq!(page.candidates.len(), 51); // 25 repositories, 25 owners, principal.
+    let keys = page
+        .candidates
+        .iter()
+        .map(|c| c.observation().key())
+        .collect::<Vec<_>>();
+    let mut publication = PagePublication::new(page);
+    for key in &keys[..32] {
+        assert!(publication.completed_page().is_none());
+        publication.acknowledge(key).unwrap();
+    }
+    // Backpressure or a dropped waiter does not acknowledge the current item.
+    assert!(publication.completed_page().is_none());
+    let remaining = publication.next_candidate().unwrap().clone();
+    assert_eq!(remaining.observation().key(), keys[32]);
+    assert!(publication.acknowledge(&keys[31]).is_err());
+    assert_eq!(
+        publication.next_candidate().unwrap().observation(),
+        remaining.observation()
+    );
+    // A dispatched operation may already have committed after its waiter ended.
+    // Its repeated observation is semantically unchanged, not another write.
+    let current = ObservedTarget {
+        key: remaining.observation().key(),
+        version: TargetVersion {
+            revision: 1,
+            next_base: 1,
+            pending_id: None,
+            conflicted: false,
+        },
+        value: Some(remaining.observation().clone()),
+        history_cursor: 1,
+    };
+    assert!(matches!(
+        remaining
+            .decide(&current, Some(publication.context()))
+            .unwrap(),
+        PublicationDecision::Noop
+    ));
+    for key in &keys[32..] {
+        publication.acknowledge(key).unwrap();
+    }
+    assert!(publication.next_candidate().is_none());
+    assert!(publication.acknowledge(keys.last().unwrap()).is_err());
+    let completed = publication.completed_page().unwrap();
+    let request = CatalogPageRequest::new(selection(), completed.next_cursor().as_ref()).unwrap();
+    assert_eq!(request.page(), 2);
+    assert_eq!(completed.provider_page().observed_at_ms, 1);
+    assert_eq!(completed.provider_page().groups.len(), 25);
+    assert_eq!(
+        completed
+            .provider_page()
+            .groups
+            .iter()
+            .map(|g| g.repositories.len())
+            .sum::<usize>(),
+        25
+    );
+}
 fn apply(
     page: &PreparedPage,
     state: &mut BTreeMap<ObservationKey, RepositoryObservation>,

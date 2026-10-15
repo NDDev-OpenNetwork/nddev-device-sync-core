@@ -163,10 +163,12 @@ pub struct ProviderRepositoryPage {
     pub observed_at_ms: u64,
     pub has_more: bool,
 }
+#[derive(Clone)]
 pub struct RepositoryOwnerGroup {
     pub owner: GithubOwner,
     pub repositories: Vec<RepositorySummary>,
 }
+#[derive(Clone)]
 pub enum CatalogContinuation {
     More(CatalogCursor),
     /// End reported for this credential's access-scoped listing only. Absence
@@ -175,6 +177,7 @@ pub enum CatalogContinuation {
     /// Provider still reports more; the local page budget is incomplete.
     LimitReached,
 }
+#[derive(Clone)]
 pub struct RepositoryPage {
     pub principal: GithubOwner,
     pub groups: Vec<RepositoryOwnerGroup>,
