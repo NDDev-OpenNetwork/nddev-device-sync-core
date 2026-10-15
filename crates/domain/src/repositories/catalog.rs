@@ -1,5 +1,5 @@
-//! One transient authenticated GitHub page for NdsClient. No secret, wire,
-//! persistent registry, filesystem placement or Git mutation authority.
+//! GitHub catalog identities, provider pages and saved observations for NdsClient.
+//! No secret, concrete storage, filesystem placement or Git mutation authority.
 use crate::{modules::ModuleError, sync::MAX_REVISION, valid_identifier};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
