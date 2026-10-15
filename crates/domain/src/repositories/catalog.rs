@@ -1,5 +1,5 @@
-//! One transient authenticated GitHub page for NdsClient. No secret, wire,
-//! persistent registry, filesystem placement or Git mutation authority.
+//! GitHub catalog identities, provider pages and saved observations for NdsClient.
+//! No secret, concrete storage, filesystem placement or Git mutation authority.
 use crate::{modules::ModuleError, sync::MAX_REVISION, valid_identifier};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -163,10 +163,12 @@ pub struct ProviderRepositoryPage {
     pub observed_at_ms: u64,
     pub has_more: bool,
 }
+#[derive(Clone)]
 pub struct RepositoryOwnerGroup {
     pub owner: GithubOwner,
     pub repositories: Vec<RepositorySummary>,
 }
+#[derive(Clone)]
 pub enum CatalogContinuation {
     More(CatalogCursor),
     /// End reported for this credential's access-scoped listing only. Absence
@@ -175,6 +177,7 @@ pub enum CatalogContinuation {
     /// Provider still reports more; the local page budget is incomplete.
     LimitReached,
 }
+#[derive(Clone)]
 pub struct RepositoryPage {
     pub principal: GithubOwner,
     pub groups: Vec<RepositoryOwnerGroup>,
