@@ -325,7 +325,7 @@ fn conflict_requires_catchup_then_fresh_input_not_old_rebase() {
     assert!(!guard.matches(&wrong_key));
 }
 #[test]
-fn equal_conflict_settles_only_with_current_guard_and_no_new_write() {
+fn equal_conflict_still_requires_a_current_guard_for_explicit_resolution() {
     let value = repo(9, 2, "same", "scan");
     let c = capture(value.clone(), 0);
     let op = operation(&c, "loser");
@@ -603,4 +603,130 @@ fn equal_scope_counts_under_a_replacement_credential_require_a_new_observation()
     let mut other_source = fact.clone();
     other_source.source.context = fresh.source.context;
     assert!(fact.material_eq(&other_source));
+}
+
+#[test]
+fn retained_conflict_restores_without_fabricating_the_old_local_capture() {
+    let old = repo(9, 2, "old", "old-scan");
+    let candidate = Capture::before_read(
+        old.key(),
+        TargetVersion {
+            revision: 3,
+            next_base: 5,
+            pending_id: Some("old-predecessor".into()),
+            conflicted: false,
+        },
+    )
+    .unwrap()
+    .confirm(old.clone())
+    .unwrap();
+    let original = operation(&candidate, "retained");
+    let receipt = Receipt {
+        operation_id: original.operation.id.clone(),
+        server_seq: 10,
+        decision: Decision::Conflict {
+            base_revision: 5,
+            current_revision: 7,
+        },
+    };
+    drop(candidate);
+    let decoded: RepositoryObservation =
+        serde_json::from_slice(&serde_json::to_vec(&old).unwrap()).unwrap();
+    let restored = KnownConflict::restore(decoded, &original, 100, &receipt).unwrap();
+    let winner = repo(9, 3, "winner", "winner-scan");
+    let current = target(&winner, 7);
+    let read = restored.fresh_read(&current).unwrap().unwrap();
+    assert!(read.confirm(old.clone()).is_err());
+    let fresh = repo(9, 4, "fresh-provider-value", "fresh-scan");
+    let read = KnownConflict::restore(old.clone(), &original, 100, &receipt)
+        .unwrap()
+        .fresh_read(&current)
+        .unwrap()
+        .unwrap();
+    let ResolutionDecision::Write { candidate, guard } = read
+        .confirm(fresh.clone())
+        .unwrap()
+        .decide(&current, Some(&fresh.source.context))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(candidate.expected(), &current.version);
+    assert_eq!(guard.through_seq, 10);
+    assert!(guard.matches(&current));
+    let mut behind = current;
+    behind.history_cursor = 9;
+    assert!(
+        KnownConflict::restore(old.clone(), &original, 100, &receipt)
+            .unwrap()
+            .fresh_read(&behind)
+            .unwrap()
+            .is_none()
+    );
+    let wrong_receipt = Receipt {
+        operation_id: "different-original".into(),
+        server_seq: 10,
+        decision: Decision::Conflict {
+            base_revision: 5,
+            current_revision: 7,
+        },
+    };
+    assert!(KnownConflict::restore(old.clone(), &original, 100, &wrong_receipt).is_err());
+    let applied = Receipt {
+        operation_id: original.operation.id.clone(),
+        server_seq: 10,
+        decision: Decision::Apply { revision: 6 },
+    };
+    assert!(KnownConflict::restore(old.clone(), &original, 100, &applied).is_err());
+    assert!(
+        KnownConflict::restore(repo(10, 2, "other", "old-scan"), &original, 100, &receipt).is_err()
+    );
+    let legacy = VersionedOperation {
+        operation: original.operation,
+        version: nddev_device_sync_domain::sync::history::OperationVersion::V2,
+    };
+    assert!(KnownConflict::restore(old, &legacy, 100, &receipt).is_err());
+}
+
+#[test]
+fn a_retained_equal_receipt_can_require_fresh_evidence_for_its_whole_family() {
+    let old = repo(9, 2, "same", "old-scan");
+    let original = operation(&capture(old.clone(), 0), "equal");
+    let receipt = Receipt {
+        operation_id: original.operation.id.clone(),
+        server_seq: 10,
+        decision: Decision::Conflict {
+            base_revision: 0,
+            current_revision: 1,
+        },
+    };
+    let mut current = target(&old, 1);
+    current.version.conflicted = true;
+    current.version.pending_id = Some("blocked-successor".into());
+    let read = KnownConflict::restore(old.clone(), &original, 100, &receipt)
+        .unwrap()
+        .fresh_read(&current)
+        .unwrap()
+        .unwrap();
+    assert!(read.confirm(old.clone()).is_err());
+    let fresh = repo(9, 2, "same", "fresh-scan");
+    let read = KnownConflict::restore(old, &original, 100, &receipt)
+        .unwrap()
+        .fresh_read(&current)
+        .unwrap()
+        .unwrap();
+    let ResolutionDecision::Equivalent(guard) = read
+        .confirm(fresh.clone())
+        .unwrap()
+        .decide(&current, Some(&fresh.source.context))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        guard.version.pending_id.as_deref(),
+        Some("blocked-successor")
+    );
+    current.version.pending_id = Some("later-intent".into());
+    assert!(!guard.matches(&current));
 }

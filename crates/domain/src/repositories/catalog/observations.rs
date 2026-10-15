@@ -411,7 +411,7 @@ pub enum ReceiptAction {
     Conflict(Box<KnownConflict>),
 }
 pub struct KnownConflict {
-    candidate: Candidate,
+    observation: RepositoryObservation,
     current_revision: u64,
     server_seq: u64,
 }
@@ -441,6 +441,8 @@ pub struct ResolutionCandidate {
 pub enum ResolutionDecision {
     ReRead,
     SourceChanged,
+    /// Equal material still needs the existing confirmed resolution operation;
+    /// this guard is never permission to delete retained conflicts locally.
     Equivalent(SettlementGuard),
     Write {
         candidate: Box<Candidate>,
@@ -521,7 +523,7 @@ impl DispatchedObservation {
             Decision::Conflict {
                 current_revision, ..
             } => ReceiptAction::Conflict(Box::new(KnownConflict {
-                candidate: self.candidate.clone(),
+                observation: self.candidate.observation.clone(),
                 current_revision,
                 server_seq: receipt.server_seq,
             })),
@@ -529,11 +531,65 @@ impl DispatchedObservation {
     }
 }
 impl KnownConflict {
+    /// Restore one actual retained conflict without inventing the pre-dispatch
+    /// target revision/pending ID, which cannot be recovered from the wire body.
+    /// The adapter authenticates/decrypts the snapshot and retains exact bytes.
+    pub fn restore(
+        observation: RepositoryObservation,
+        operation: &VersionedOperation,
+        wire_bytes: usize,
+        receipt: &Receipt,
+    ) -> Result<Self, ModuleError> {
+        observation.validate()?;
+        operation
+            .validate(wire_bytes)
+            .map_err(|_| ModuleError::InvalidInput)?;
+        if !matches!(operation.version, OperationVersion::V3 { .. })
+            || operation.operation.entity_kind != EntityKind::RepositoryState
+            || operation.operation.entity_id != observation.key().entity_id()
+        {
+            return Err(ModuleError::InvalidInput);
+        }
+        receipt
+            .validate_for(&operation.operation)
+            .map_err(|_| ModuleError::InvalidResponse)?;
+        let Decision::Conflict {
+            current_revision, ..
+        } = receipt.decision
+        else {
+            return Err(ModuleError::InvalidResponse);
+        };
+        Ok(Self {
+            observation,
+            current_revision,
+            server_seq: receipt.server_seq,
+        })
+    }
+
+    /// A whole family may contain other alternatives or a blocked successor.
+    /// Its caller can require fresh provider evidence even if this one receipt
+    /// is equivalent. None means the committed projection must catch up first.
+    pub fn fresh_read(
+        self,
+        current: &ObservedTarget,
+    ) -> Result<Option<ResolutionRead>, ModuleError> {
+        let old_scan = self.observation.source.context.scan_id.clone();
+        Ok(match self.review(current)? {
+            ConflictAction::CatchUp => None,
+            ConflictAction::FreshRead(read) => Some(read),
+            ConflictAction::Equivalent(guard) => Some(ResolutionRead {
+                capture: Capture::before_read(current.key.clone(), current.version.clone())?,
+                guard,
+                old_scan,
+            }),
+        })
+    }
+
     /// through_seq is only a transient reviewed receipt guard, never a payload
     /// lifecycle declaration or authority to prune server history.
     pub fn review(self, current: &ObservedTarget) -> Result<ConflictAction, ModuleError> {
         current.validate()?;
-        if current.key != self.candidate.observation.key() {
+        if current.key != self.observation.key() {
             return Err(ModuleError::InvalidInput);
         }
         if current.version.revision < self.current_revision
@@ -550,14 +606,14 @@ impl KnownConflict {
         if current
             .value
             .as_ref()
-            .is_some_and(|v| v.material_eq(&self.candidate.observation))
+            .is_some_and(|v| v.material_eq(&self.observation))
         {
             Ok(ConflictAction::Equivalent(guard))
         } else {
             Ok(ConflictAction::FreshRead(ResolutionRead {
                 capture: Capture::before_read(current.key.clone(), current.version.clone())?,
                 guard,
-                old_scan: self.candidate.observation.source.context.scan_id.clone(),
+                old_scan: self.observation.source.context.scan_id.clone(),
             }))
         }
     }
