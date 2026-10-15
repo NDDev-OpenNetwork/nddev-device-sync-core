@@ -519,9 +519,7 @@ impl DispatchedObservation {
         let Some(receipt) = receipt else {
             return Ok(ReceiptAction::ReplayOriginal);
         };
-        receipt
-            .validate_for(&self.operation.operation)
-            .map_err(|_| ModuleError::InvalidResponse)?;
+        validate_observation_receipt(&self.operation, receipt)?;
         Ok(match receipt.decision {
             Decision::Apply { revision } => ReceiptAction::Applied {
                 revision,
@@ -558,9 +556,7 @@ impl KnownConflict {
         {
             return Err(ModuleError::InvalidInput);
         }
-        receipt
-            .validate_for(&operation.operation)
-            .map_err(|_| ModuleError::InvalidResponse)?;
+        validate_observation_receipt(operation, receipt)?;
         let Decision::Conflict {
             current_revision, ..
         } = receipt.decision
@@ -625,4 +621,18 @@ impl KnownConflict {
             }))
         }
     }
+}
+
+fn validate_observation_receipt(
+    operation: &VersionedOperation,
+    receipt: &Receipt,
+) -> Result<(), ModuleError> {
+    receipt
+        .validate_for(&operation.operation)
+        .map_err(|_| ModuleError::InvalidResponse)?;
+    if matches!(operation.version, OperationVersion::V3 { basis_seq, .. } if receipt.server_seq <= basis_seq)
+    {
+        return Err(ModuleError::InvalidResponse);
+    }
+    Ok(())
 }

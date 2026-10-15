@@ -769,3 +769,52 @@ fn a_pending_original_behind_the_committed_head_is_preserved_without_rebasing_it
     current.version.pending_id = None;
     assert!(current.version.validate().is_err());
 }
+
+#[test]
+fn restored_and_live_receipts_must_follow_the_original_admission_basis() {
+    let value = repo(9, 2, "value", "scan");
+    let candidate = capture(value.clone(), 0);
+    let mut inner = operation(&candidate, "template").operation;
+    inner.id = "later-basis".into();
+    inner.idempotency_key = "later-basis".into();
+    let original = VersionedOperation::qualify(
+        inner,
+        5,
+        Lifecycle {
+            resolved_through_seq: 0,
+        },
+    )
+    .unwrap();
+    let dispatched = candidate.bind_dispatched(original.clone(), 100).unwrap();
+    for sequence in [4, 5] {
+        let conflict = Receipt {
+            operation_id: original.operation.id.clone(),
+            server_seq: sequence,
+            decision: Decision::Conflict {
+                base_revision: 0,
+                current_revision: 1,
+            },
+        };
+        assert!(KnownConflict::restore(value.clone(), &original, 100, &conflict).is_err());
+        assert!(dispatched.settle(Some(&conflict), 1).is_err());
+        let applied = Receipt {
+            operation_id: original.operation.id.clone(),
+            server_seq: sequence,
+            decision: Decision::Apply { revision: 1 },
+        };
+        assert!(dispatched.settle(Some(&applied), 1).is_err());
+    }
+    let actual = Receipt {
+        operation_id: original.operation.id.clone(),
+        server_seq: 6,
+        decision: Decision::Conflict {
+            base_revision: 0,
+            current_revision: 1,
+        },
+    };
+    assert!(KnownConflict::restore(value, &original, 100, &actual).is_ok());
+    assert!(matches!(
+        dispatched.settle(Some(&actual), 1).unwrap(),
+        ReceiptAction::Conflict(_)
+    ));
+}
