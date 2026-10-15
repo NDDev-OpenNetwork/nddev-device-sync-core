@@ -422,7 +422,9 @@ pub struct SettlementGuard {
     pub key: ObservationKey,
     pub version: TargetVersion,
     pub history_cursor: u64,
-    pub through_seq: u64,
+    /// None for an actual blocked, undispatched local intent without a receipt.
+    /// This is distinct from the committed operation's resolution lifecycle.
+    pub receipt_seq: Option<u64>,
 }
 impl SettlementGuard {
     /// A new explicit resolution targets the observed committed head. The old
@@ -434,7 +436,9 @@ impl SettlementGuard {
         self.key == current.key
             && self.version == current.version
             && self.history_cursor == current.history_cursor
-            && current.history_cursor >= self.through_seq
+            && self
+                .receipt_seq
+                .is_none_or(|seq| current.history_cursor >= seq)
     }
 }
 pub struct ResolutionRead {
@@ -458,6 +462,42 @@ pub enum ResolutionDecision {
     },
 }
 impl ResolutionRead {
+    /// Prepare a fresh read for an actual local blocked intent. The adapter
+    /// supplies its verified dispatch/state fact; no server receipt is invented.
+    pub fn blocked_intent(
+        observation: RepositoryObservation,
+        operation: &VersionedOperation,
+        wire_bytes: usize,
+        current: &ObservedTarget,
+        blocked_undispatched: bool,
+    ) -> Result<Self, ModuleError> {
+        current.validate()?;
+        observation.validate()?;
+        operation
+            .validate(wire_bytes)
+            .map_err(|_| ModuleError::InvalidInput)?;
+        if !blocked_undispatched
+            || !current.version.conflicted
+            || current.value.is_none()
+            || current.version.pending_id.as_deref() != Some(operation.operation.id.as_str())
+            || !matches!(operation.version, OperationVersion::V3 { .. })
+            || operation.operation.entity_kind != EntityKind::RepositoryState
+            || operation.operation.entity_id != observation.key().entity_id()
+            || current.key != observation.key()
+        {
+            return Err(ModuleError::InvalidInput);
+        }
+        Ok(Self {
+            capture: Capture::before_read(current.key.clone(), current.version.clone())?,
+            guard: SettlementGuard {
+                key: current.key.clone(),
+                version: current.version.clone(),
+                history_cursor: current.history_cursor,
+                receipt_seq: None,
+            },
+            old_scan: observation.source.context.scan_id,
+        })
+    }
     /// A fresh scan marker cannot turn an old Candidate into a rebased one.
     /// The caller use case must actually read the provider again.
     pub fn confirm(
@@ -589,7 +629,7 @@ impl KnownConflict {
         })
     }
 
-    /// through_seq is only a transient reviewed receipt guard, never a payload
+    /// receipt_seq is only a transient reviewed receipt guard, never a payload
     /// lifecycle declaration or authority to prune server history.
     pub fn review(self, current: &ObservedTarget) -> Result<ConflictAction, ModuleError> {
         current.validate()?;
@@ -605,7 +645,7 @@ impl KnownConflict {
             key: current.key.clone(),
             version: current.version.clone(),
             history_cursor: current.history_cursor,
-            through_seq: self.server_seq,
+            receipt_seq: Some(self.server_seq),
         };
         if current
             .value

@@ -345,7 +345,7 @@ fn equal_conflict_still_requires_a_current_guard_for_explicit_resolution() {
         panic!()
     };
     assert!(guard.matches(&target(&value, 1)));
-    assert_eq!(guard.through_seq, 10);
+    assert_eq!(guard.receipt_seq, Some(10));
     let mut changed = target(&value, 1);
     changed.version.pending_id = Some("successor".into());
     assert!(!guard.matches(&changed));
@@ -652,7 +652,7 @@ fn retained_conflict_restores_without_fabricating_the_old_local_capture() {
         panic!()
     };
     assert_eq!(candidate.expected(), &current.version);
-    assert_eq!(guard.through_seq, 10);
+    assert_eq!(guard.receipt_seq, Some(10));
     assert!(guard.matches(&current));
     let mut behind = current;
     behind.history_cursor = 9;
@@ -817,4 +817,46 @@ fn restored_and_live_receipts_must_follow_the_original_admission_basis() {
         dispatched.settle(Some(&actual), 1).unwrap(),
         ReceiptAction::Conflict(_)
     ));
+}
+
+#[test]
+fn blocked_local_intent_requires_fresh_input_without_fabricating_a_receipt() {
+    let old = repo(9, 2, "local", "old-local-scan");
+    let original = operation(&capture(old.clone(), 0), "blocked-local");
+    let mut current = target(&repo(9, 3, "committed", "peer-scan"), 2);
+    current.version.pending_id = Some(original.operation.id.clone());
+    current.version.conflicted = true;
+    let prepare = |current: &ObservedTarget, blocked| {
+        ResolutionRead::blocked_intent(old.clone(), &original, 100, current, blocked)
+    };
+    assert!(prepare(&current, false).is_err());
+    assert!(
+        prepare(&current, true)
+            .unwrap()
+            .confirm(old.clone())
+            .is_err()
+    );
+    let fresh = repo(9, 4, "fresh", "fresh-provider-scan");
+    let ResolutionDecision::Write { candidate, guard } = prepare(&current, true)
+        .unwrap()
+        .confirm(fresh.clone())
+        .unwrap()
+        .decide(&current, Some(&fresh.source.context))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(guard.receipt_seq, None);
+    assert_eq!(guard.resolution_base(), 2);
+    assert_eq!(candidate.expected().pending_id, current.version.pending_id);
+    assert_eq!(original.operation.base_revision, 0);
+    let mut changed = current.clone();
+    changed.version.pending_id = Some("newer-intent".into());
+    assert!(prepare(&changed, true).is_err());
+    let mut missing = current.clone();
+    missing.value = None;
+    assert!(prepare(&missing, true).is_err());
+    let mut ordinary = current;
+    ordinary.version.conflicted = false;
+    assert!(prepare(&ordinary, true).is_err());
 }
