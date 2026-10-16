@@ -118,6 +118,22 @@ pub struct Progress {
     pub cursor: u64,
     pub inbox_at_head: bool,
     pub caught_up: bool,
+    pub capacity_probe: Option<CapacityProbeOutcome>,
+}
+/// Actual result of the one-original check, after durable local handling.
+/// Unknown preserves the original and excludes it from later claims; it does
+/// not assert whether that original ever committed on the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapacityProbeOutcome {
+    Receipt,
+    Unknown,
+    NoEligibleWork,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReconcileMode {
+    Full,
+    Inbox,
+    CapacityProbe,
 }
 pub trait ReplicaPort {
     type Error: From<SyncError>;
@@ -139,6 +155,8 @@ pub trait ReplicaPort {
         confirmed: ConfirmedWriter,
     ) -> impl Future<Output = Result<(), Self::Error>>;
     fn claim(&self) -> impl Future<Output = Result<Vec<Self::Pending>, Self::Error>>;
+    /// Must claim at most one root, without marking other work dispatched.
+    fn claim_one(&self) -> impl Future<Output = Result<Option<Self::Pending>, Self::Error>>;
     fn append_outcome(
         &self,
         pending: &Self::Pending,
@@ -199,6 +217,23 @@ pub async fn reconcile_history<P: CheckpointPort>(
     port: &P,
     inbox_only: bool,
 ) -> Result<Progress, P::Error> {
+    reconcile_mode(
+        port,
+        if inbox_only {
+            ReconcileMode::Inbox
+        } else {
+            ReconcileMode::Full
+        },
+    )
+    .await
+}
+pub async fn probe_capacity<P: CheckpointPort>(port: &P) -> Result<Progress, P::Error> {
+    reconcile_mode(port, ReconcileMode::CapacityProbe).await
+}
+async fn reconcile_mode<P: CheckpointPort>(
+    port: &P,
+    mode_request: ReconcileMode,
+) -> Result<Progress, P::Error> {
     let mut budget = BatchBudget::new();
     let mut progress = Progress {
         uploaded: 0,
@@ -206,6 +241,7 @@ pub async fn reconcile_history<P: CheckpointPort>(
         cursor: port.cursor().await?,
         inbox_at_head: false,
         caught_up: false,
+        capacity_probe: None,
     };
     let (mode, writer) = negotiated(port.negotiate().await?)?;
     let facts = port.writer_facts().await?;
@@ -277,22 +313,41 @@ pub async fn reconcile_history<P: CheckpointPort>(
             return Ok(progress);
         }
     }
-    if !inbox_only && !had_stage {
-        let pending = port.claim().await?;
-        if pending.len() > MAX_UPLOADS {
+    if mode_request != ReconcileMode::Inbox && !had_stage {
+        let probe = mode_request == ReconcileMode::CapacityProbe;
+        let pending = if probe {
+            port.claim_one().await?.into_iter().collect()
+        } else {
+            port.claim().await?
+        };
+        if pending.len() > if probe { 1 } else { MAX_UPLOADS } {
             return Err(SyncError::Invalid.into());
+        }
+        if probe && pending.is_empty() {
+            progress.capacity_probe = Some(CapacityProbeOutcome::NoEligibleWork);
         }
         for pending in pending {
             if !budget.take_upload() {
                 break;
             }
-            match port.append_outcome(&pending).await? {
+            let handled = match port.append_outcome(&pending).await? {
                 AppendOutcome::Receipt(receipt) => {
                     port.acknowledge(pending, receipt).await?;
                     progress.uploaded += 1;
+                    CapacityProbeOutcome::Receipt
                 }
-                AppendOutcome::Unknown(reason) => port.remember_unknown(&pending, reason).await?,
+                AppendOutcome::Unknown(reason) => {
+                    port.remember_unknown(&pending, reason).await?;
+                    CapacityProbeOutcome::Unknown
+                }
+            };
+            if probe {
+                progress.capacity_probe = Some(handled);
             }
+        }
+        if probe {
+            // A later inbox error must not hide the actual handled outcome.
+            return Ok(progress);
         }
     }
     while budget.take_read() {

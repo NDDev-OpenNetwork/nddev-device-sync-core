@@ -17,6 +17,7 @@ struct Port {
     prereads: Cell<usize>,
     pending: Cell<usize>,
     unknown: Cell<bool>,
+    append_refused: Cell<bool>,
     blocked: Cell<bool>,
     cursor: Cell<u64>,
     pages: RefCell<VecDeque<ReadOutcome<VerifiedPage<u64>>>>,
@@ -45,6 +46,7 @@ impl Port {
             prereads: Cell::new(0),
             pending: Cell::new(0),
             unknown: Cell::new(false),
+            append_refused: Cell::new(false),
             blocked: Cell::new(false),
             cursor: Cell::new(0),
             pages: RefCell::new(VecDeque::new()),
@@ -119,8 +121,15 @@ impl ReplicaPort for Port {
             (0..self.pending.get()).collect()
         })
     }
+    async fn claim_one(&self) -> Result<Option<usize>, SyncError> {
+        self.note("claim_one");
+        Ok((!self.blocked.get() && self.pending.get() > 0).then_some(0))
+    }
     async fn append_outcome(&self, _: &usize) -> Result<AppendOutcome<()>, SyncError> {
         self.note("append");
+        if self.append_refused.get() {
+            return Err(SyncError::CapacityExhausted);
+        }
         Ok(if self.unknown.get() {
             AppendOutcome::Unknown(UnknownReason::BasisExpired)
         } else {
@@ -278,6 +287,55 @@ fn complete<T>(f: impl Future<Output = T>) -> T {
         Poll::Ready(v) => v,
         Poll::Pending => panic!("pure unit port completes immediately"),
     }
+}
+#[test]
+fn capacity_probe_claims_and_handles_only_one_original() {
+    for unknown in [false, true] {
+        let p = Port::new();
+        p.pending.set(16);
+        p.unknown.set(unknown);
+        let progress = complete(probe_capacity(&p)).unwrap();
+        assert_eq!(
+            progress.capacity_probe,
+            Some(if unknown {
+                CapacityProbeOutcome::Unknown
+            } else {
+                CapacityProbeOutcome::Receipt
+            })
+        );
+        assert_eq!(progress.uploaded, usize::from(!unknown));
+        assert_eq!(p.pending.get(), if unknown { 16 } else { 15 });
+        assert!(!progress.caught_up && !progress.inbox_at_head);
+        let log = p.log.borrow();
+        assert_eq!(log.iter().filter(|v| *v == "claim_one").count(), 1);
+        assert_eq!(log.iter().filter(|v| *v == "append").count(), 1);
+        assert!(!log.iter().any(|v| v == "claim" || v.starts_with("read")));
+    }
+}
+#[test]
+fn capacity_probe_refusal_or_preparation_exhaustion_never_claims_recovery() {
+    let p = Port::new();
+    p.pending.set(16);
+    p.append_refused.set(true);
+    assert!(matches!(
+        complete(probe_capacity(&p)),
+        Err(SyncError::CapacityExhausted)
+    ));
+    assert_eq!(p.pending.get(), 16);
+    assert!(!p.log.borrow().iter().any(|v| v == "ack"));
+    let p = Port::new();
+    let progress = complete(probe_capacity(&p)).unwrap();
+    assert_eq!(
+        progress.capacity_probe,
+        Some(CapacityProbeOutcome::NoEligibleWork)
+    );
+    assert!(!p.log.borrow().iter().any(|v| v == "append"));
+    let p = Port::new();
+    p.pending.set(16);
+    p.prereads.set(MAX_PULL_PAGES + 1);
+    let progress = complete(probe_capacity(&p)).unwrap();
+    assert_eq!(progress.capacity_probe, None);
+    assert!(!p.log.borrow().iter().any(|v| v.starts_with("claim")));
 }
 fn hv(floor: u64, head: u64) -> HistoryVersion {
     HistoryVersion {
