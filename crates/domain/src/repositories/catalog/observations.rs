@@ -432,10 +432,14 @@ impl SettlementGuard {
     pub fn resolution_base(&self) -> u64 {
         self.version.revision
     }
+    /// Target metadata must match and the observed history cannot move backward.
+    /// The storage adapter must ALSO CAS the complete scoped conflict/pending
+    /// snapshot atomically; a cursor or this guard alone is not resolution proof.
     pub fn matches(&self, current: &ObservedTarget) -> bool {
         self.key == current.key
             && self.version == current.version
-            && self.history_cursor == current.history_cursor
+            && self.history_cursor <= current.history_cursor
+            && current.history_cursor <= MAX_REVISION
             && self
                 .receipt_seq
                 .is_none_or(|seq| current.history_cursor >= seq)
