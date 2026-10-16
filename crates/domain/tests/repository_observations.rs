@@ -319,6 +319,10 @@ fn conflict_requires_catchup_then_fresh_input_not_old_rebase() {
     assert!(guard.matches(&target(&current, 1)));
     let mut moved = target(&current, 1);
     moved.history_cursor += 1;
+    assert!(guard.matches(&moved));
+    moved.history_cursor = guard.history_cursor - 1;
+    assert!(!guard.matches(&moved));
+    moved.history_cursor = MAX_REVISION + 1;
     assert!(!guard.matches(&moved));
     let mut wrong_key = target(&current, 1);
     wrong_key.key = ObservationKey::Repository(RepositoryId::new(99).unwrap());
