@@ -1,8 +1,10 @@
 //! Client activity and retry policy. Adapters report lifecycle and own timers,
 //! task lifetimes and cancellation; no operating-system background service is
 //! implied by permission to run while a client remains visible.
+use crate::replica::CapacityProbeOutcome;
 use nddev_device_sync_domain::Platform;
-use std::time::Duration;
+use nddev_device_sync_domain::sync::history::HistoryVersion;
+use std::{sync::Arc, time::Duration};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientLifecycle {
@@ -44,13 +46,79 @@ pub enum BatchOutcome {
 #[derive(Default)]
 pub struct ReplicaSchedule {
     failures: u8,
-    capacity_blocked: bool,
+    capacity: Option<CapacityBlock>,
+    history: Option<HistoryVersion>,
 }
+struct CapacityBlock {
+    identity: Arc<()>,
+    floor: Option<u64>,
+    probe_ready: bool,
+}
+/// Identity of one actual refusal in one policy. Not upload authorization.
+#[derive(Clone)]
+pub struct CapacityCheck(Arc<()>);
 
 impl ReplicaSchedule {
     /// Adapters select inbox-only work while automatic uploads are blocked.
     pub fn is_capacity_blocked(&self) -> bool {
-        self.capacity_blocked
+        self.capacity.is_some()
+    }
+
+    /// Authenticated server metadata, never a local cursor or a lifecycle hint.
+    /// Recording it alone cannot clear a refusal or schedule an upload.
+    pub fn observe_history(&mut self, history: HistoryVersion) -> bool {
+        if history.validate().is_err()
+            || self
+                .history
+                .is_some_and(|old| history.head < old.head || history.floor < old.floor)
+        {
+            return false;
+        }
+        self.history = Some(history);
+        true
+    }
+    pub fn capacity_check(&self) -> Option<CapacityCheck> {
+        self.capacity
+            .as_ref()
+            .map(|block| CapacityCheck(block.identity.clone()))
+    }
+    /// A completed current inbox read may request ONE bounded original check
+    /// after retention changed. It is not evidence that the original will fit.
+    pub fn observe_capacity_inbox(&mut self, check: &CapacityCheck, history: HistoryVersion) {
+        if !self.observe_history(history) {
+            return;
+        }
+        if let Some(block) = &mut self.capacity
+            && Arc::ptr_eq(&block.identity, &check.0)
+        {
+            match block.floor {
+                Some(floor) if history.floor > floor => block.probe_ready = true,
+                None => block.floor = Some(history.floor),
+                _ => {}
+            }
+        }
+    }
+    pub fn capacity_probe(&self) -> Option<CapacityCheck> {
+        self.capacity
+            .as_ref()
+            .filter(|b| b.probe_ready)
+            .map(|b| CapacityCheck(b.identity.clone()))
+    }
+    /// Caller supplies an actual completed Core probe (or proven empty inbox),
+    /// then replaces policy under its existing auth/publication fence. Old work
+    /// retains this old policy, so late refusals cannot reblock its replacement.
+    pub fn recovered_capacity(
+        &self,
+        check: &CapacityCheck,
+        _outcome: CapacityProbeOutcome,
+    ) -> Option<Self> {
+        self.capacity
+            .as_ref()
+            .filter(|b| Arc::ptr_eq(&b.identity, &check.0))?;
+        Some(Self {
+            history: self.history,
+            ..Self::default()
+        })
     }
 
     /// Schedule the next batch without granting upload eligibility. Adapters
@@ -58,7 +126,11 @@ impl ReplicaSchedule {
     pub fn after(&mut self, outcome: BatchOutcome) -> Option<Duration> {
         match outcome {
             BatchOutcome::CapacityExhausted => {
-                self.capacity_blocked = true;
+                self.capacity = Some(CapacityBlock {
+                    identity: Arc::new(()),
+                    floor: self.history.map(|h| h.floor),
+                    probe_ready: false,
+                });
                 self.failures = 0;
                 Some(Duration::from_secs(15))
             }
@@ -75,7 +147,9 @@ impl ReplicaSchedule {
                 Some(match outcome {
                     // A generic late result may only report pending uploads;
                     // only InboxMore proves backlog worth an immediate pull.
-                    BatchOutcome::CatchingUp if self.capacity_blocked => Duration::from_secs(15),
+                    BatchOutcome::CatchingUp if self.is_capacity_blocked() => {
+                        Duration::from_secs(15)
+                    }
                     BatchOutcome::CatchingUp | BatchOutcome::InboxMore => {
                         Duration::from_millis(200)
                     }
@@ -106,7 +180,7 @@ impl ReplicaSchedule {
     /// Clear a capacity block only for an explicit manual retry or a verified
     /// capacity remedy. Ordinary lifecycle or success reports cannot clear it.
     pub fn retry_capacity(&mut self) {
-        self.capacity_blocked = false;
+        self.capacity = None;
         self.failures = 0;
     }
 }
@@ -114,6 +188,83 @@ impl ReplicaSchedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn history(head: u64, floor: u64) -> HistoryVersion {
+        HistoryVersion {
+            head,
+            floor,
+            base: floor,
+        }
+    }
+
+    #[test]
+    fn retention_can_enable_one_original_check_but_never_clears_capacity() {
+        let mut schedule = ReplicaSchedule::default();
+        assert!(schedule.observe_history(history(100, 0)));
+        schedule.after(BatchOutcome::CapacityExhausted);
+        let check = schedule.capacity_check().unwrap();
+        schedule.after(BatchOutcome::InboxHead);
+        schedule.observe_capacity_inbox(&check, history(200, 0));
+        assert!(schedule.capacity_probe().is_none());
+        assert!(schedule.observe_history(history(201, 10)));
+        assert!(schedule.capacity_probe().is_none()); // Metadata alone is not a completed read.
+        schedule.observe_capacity_inbox(&check, history(201, 10));
+        assert!(schedule.capacity_probe().is_some());
+        assert!(schedule.is_capacity_blocked());
+        for _ in 0..3 {
+            schedule.after(BatchOutcome::Retryable);
+            assert!(schedule.capacity_probe().is_some()); // Same immutable probe may retry transport.
+        }
+        schedule.after(BatchOutcome::CapacityExhausted);
+        let next = schedule.capacity_check().unwrap();
+        schedule.observe_capacity_inbox(&next, history(300, 10));
+        assert!(schedule.capacity_probe().is_none()); // Real refusal consumes this floor.
+        assert!(
+            schedule
+                .recovered_capacity(&check, CapacityProbeOutcome::Receipt)
+                .is_none()
+        );
+        schedule.observe_capacity_inbox(&next, history(301, 11));
+        assert!(schedule.capacity_probe().is_some());
+        let replacement = schedule
+            .recovered_capacity(&next, CapacityProbeOutcome::Receipt)
+            .unwrap();
+        assert!(!replacement.is_capacity_blocked());
+        assert!(schedule.is_capacity_blocked()); // Old publishers keep the old policy.
+    }
+
+    #[test]
+    fn absent_backward_or_foreign_evidence_cannot_restore_uploads() {
+        let mut schedule = ReplicaSchedule::default();
+        schedule.after(BatchOutcome::CapacityExhausted);
+        let check = schedule.capacity_check().unwrap();
+        schedule.observe_capacity_inbox(&check, history(100, 50));
+        assert!(schedule.capacity_probe().is_none());
+        for h in [history(99, 51), history(101, 49), history(40, 50)] {
+            assert!(!schedule.observe_history(h));
+        }
+        assert!(schedule.capacity_probe().is_none());
+        let mut other = ReplicaSchedule::default();
+        other.after(BatchOutcome::CapacityExhausted);
+        assert!(
+            other
+                .recovered_capacity(&check, CapacityProbeOutcome::NoEligibleWork)
+                .is_none()
+        );
+        other.observe_capacity_inbox(&check, history(200, 60));
+        assert!(other.capacity_probe().is_none());
+        for outcome in [
+            CapacityProbeOutcome::Receipt,
+            CapacityProbeOutcome::Unknown,
+            CapacityProbeOutcome::NoEligibleWork,
+        ] {
+            assert!(
+                !schedule
+                    .recovered_capacity(&check, outcome)
+                    .unwrap()
+                    .is_capacity_blocked()
+            );
+        }
+    }
 
     #[test]
     fn visible_focus_loss_does_not_suspend_desktop_or_web_work() {
