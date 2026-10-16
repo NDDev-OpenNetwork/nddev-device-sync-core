@@ -49,6 +49,29 @@ fn history(head: u64) -> HistoryVersion {
     }
 }
 #[test]
+fn soft_watermark_leaves_room_for_conflicts_without_allowing_them_to_prune() {
+    let caps = RetentionCaps {
+        rows: 8,
+        ..RetentionCaps::default()
+    };
+    let applied = row(7, "a", Some(7), 0);
+    let conflict = row(7, "a", None, 0);
+    assert!(!caps.requires_retention(5, 0, applied, 2));
+    assert!(caps.requires_retention(6, 0, applied, 2));
+    assert!(!caps.requires_retention(6, 0, conflict, 2));
+    assert!(!caps.requires_retention(7, 0, conflict, 2));
+    assert!(caps.requires_retention(8, 0, conflict, 2));
+    let bytes = RetentionCaps {
+        bytes: 100_000,
+        ..RetentionCaps::default()
+    };
+    assert!(bytes.requires_retention(0, 60_000, applied, 1));
+    assert!(!bytes.requires_retention(0, 60_000, conflict, 1));
+    assert!(bytes.requires_retention(0, 100_000, conflict, 1));
+    assert!(bytes.requires_retention(0, u64::MAX, conflict, 1));
+}
+
+#[test]
 fn pressure_keeps_the_earliest_suffix_with_room_for_a_bounded_wave() {
     let rows = (1..=8)
         .map(|n| row(n, "shared", Some(n), 0))

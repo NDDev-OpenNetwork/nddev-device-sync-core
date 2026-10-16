@@ -4,6 +4,18 @@ pub mod history;
 pub use nddev_device_sync_domain::{DeviceId, identity::AuthenticatedSession, sync::*};
 use std::future::Future;
 
+/// One already-bounded publication wave per active device. Retention starts
+/// with one wave free and aims for two, avoiding maintenance on every append.
+pub fn retention_reserve_rows(active_devices: u64) -> Result<u64, SyncError> {
+    let window = crate::replica::MAX_UPLOADS
+        .max(crate::repositories::catalog::observations::OBSERVATION_WINDOW)
+        as u64;
+    active_devices
+        .checked_mul(window)
+        .filter(|rows| *rows > 0 && *rows <= MAX_OPERATIONS / 2)
+        .ok_or(SyncError::Invalid)
+}
+
 pub struct SignedRequest {
     pub device: DeviceId,
     pub nonce: String,

@@ -291,6 +291,37 @@ pub struct RetentionCaps {
     pub bytes: u64,
     pub entities: u64,
 }
+impl RetentionCaps {
+    fn reserving(self, rows: u64) -> Self {
+        let row_bytes = (2 * MAX_OPERATION_BYTES + MAX_RESULT_BYTES) as u64;
+        Self {
+            rows: self.rows.saturating_sub(rows),
+            bytes: self.bytes.saturating_sub(rows.saturating_mul(row_bytes)),
+            entities: self.entities,
+        }
+    }
+    fn fits_append(self, count: u64, bytes: u64, extra: RetainedMeta<'_>) -> bool {
+        count < self.rows
+            && bytes
+                .checked_add(extra.cost())
+                .is_some_and(|n| n <= self.bytes)
+    }
+    /// Applied writes replenish headroom before the hard limit. Conflicts may
+    /// consume that reserve, but never initiate maintenance at the soft limit.
+    pub fn requires_retention(
+        self,
+        count: u64,
+        bytes: u64,
+        extra: RetainedMeta<'_>,
+        reserve_rows: u64,
+    ) -> bool {
+        !self.fits_append(count, bytes, extra)
+            || matches!(extra.decision, Decision::Apply { .. })
+                && !self
+                    .reserving(reserve_rows)
+                    .fits_append(count, bytes, extra)
+    }
+}
 impl Default for RetentionCaps {
     fn default() -> Self {
         Self {
@@ -538,7 +569,10 @@ pub fn append_retention_plan(
         .checked_add(1)
         .filter(|v| *v <= MAX_REVISION)
         .ok_or(SyncError::CapacityExhausted)?;
-    if extra.sequence != next || reserve_rows > MAX_OPERATIONS {
+    if rows.len() > MAX_OPERATIONS as usize
+        || extra.sequence != next
+        || reserve_rows > MAX_OPERATIONS
+    {
         return Err(SyncError::Invalid);
     }
     let history = HistoryVersion {
@@ -570,13 +604,7 @@ pub fn append_retention_plan(
         retention_plan(rows, Some(extra), history, current.head, caps)?
     };
     let latest_cut = last.base;
-    let preferred = RetentionCaps {
-        rows: caps.rows.saturating_sub(reserve_rows),
-        bytes: caps
-            .bytes
-            .saturating_sub(reserve_rows * (2 * MAX_OPERATION_BYTES + MAX_RESULT_BYTES) as u64),
-        entities: caps.entities,
-    };
+    let preferred = caps.reserving(reserve_rows);
     // Reserve is a preference, never a prerequisite for a meaningful resolution.
     // A pinned keep-set may only permit that one append to make progress.
     let (mut best, target) = match retention_plan(rows, Some(extra), history, latest_cut, preferred)
