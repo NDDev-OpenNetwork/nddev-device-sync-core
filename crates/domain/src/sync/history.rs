@@ -519,6 +519,101 @@ pub fn atomic_resolution(
         caps,
     )
 }
+
+/// Admit a pressured append with room for a bounded following upload wave when
+/// the keep-set permits it. Hard quotas never increase. A resolver must first
+/// pass the same witness/CAS checks as atomic_resolution; an ordinary failed CAS
+/// cannot publish maintenance. Prefer the earliest sufficient cut so original
+/// receipts and in-flight admission bases survive for as long as possible.
+pub fn append_retention_plan(
+    rows: &[RetainedMeta<'_>],
+    extra: RetainedMeta<'_>,
+    current: HistoryVersion,
+    caps: RetentionCaps,
+    reserve_rows: u64,
+) -> Result<RetentionPlan, SyncError> {
+    current.validate()?;
+    let next = current
+        .head
+        .checked_add(1)
+        .filter(|v| *v <= MAX_REVISION)
+        .ok_or(SyncError::CapacityExhausted)?;
+    if extra.sequence != next || reserve_rows > MAX_OPERATIONS {
+        return Err(SyncError::Invalid);
+    }
+    let history = HistoryVersion {
+        head: next,
+        ..current
+    };
+    let previous = rows.iter().rev().find(|r| {
+        r.kind == extra.kind
+            && r.entity == extra.entity
+            && matches!(r.decision, Decision::Apply { .. })
+    });
+    let previous_resolution = previous.map_or(0, |r| r.resolution());
+    let last = if extra.resolution() > previous_resolution {
+        let witnesses = rows
+            .iter()
+            .filter(|r| {
+                r.kind == extra.kind
+                    && r.entity == extra.entity
+                    && matches!(r.decision, Decision::Conflict { .. })
+                    && r.sequence <= extra.resolution()
+            })
+            .map(|r| r.sequence)
+            .collect::<Vec<_>>();
+        atomic_resolution(rows, extra, &witnesses, current, current, caps)?
+    } else {
+        if !matches!(extra.decision, Decision::Apply { .. }) {
+            return Err(SyncError::CapacityExhausted);
+        }
+        retention_plan(rows, Some(extra), history, current.head, caps)?
+    };
+    let latest_cut = last.base;
+    let preferred = RetentionCaps {
+        rows: caps.rows.saturating_sub(reserve_rows),
+        bytes: caps
+            .bytes
+            .saturating_sub(reserve_rows * (2 * MAX_OPERATION_BYTES + MAX_RESULT_BYTES) as u64),
+        entities: caps.entities,
+    };
+    // Reserve is a preference, never a prerequisite for a meaningful resolution.
+    // A pinned keep-set may only permit that one append to make progress.
+    let (mut best, target) = match retention_plan(rows, Some(extra), history, latest_cut, preferred)
+    {
+        Ok(plan) => (plan, preferred),
+        Err(SyncError::CapacityExhausted) => (last, caps),
+        Err(error) => return Err(error),
+    };
+    let mut cuts = rows
+        .iter()
+        .filter(|r| {
+            r.sequence >= current.floor
+                && r.sequence <= latest_cut
+                && matches!(r.decision, Decision::Apply { .. })
+        })
+        .map(|r| r.sequence)
+        .collect::<Vec<_>>();
+    cuts.extend([current.floor, latest_cut]);
+    cuts.sort_unstable();
+    cuts.dedup();
+    let (mut low, mut high) = (0, cuts.len() - 1);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match retention_plan(rows, Some(extra), history, cuts[mid], target) {
+            Ok(plan) => {
+                best = plan;
+                high = mid;
+            }
+            Err(SyncError::CapacityExhausted) => low = mid + 1,
+            Err(error) => return Err(error),
+        }
+    }
+    if best.base != cuts[low] {
+        best = retention_plan(rows, Some(extra), history, cuts[low], target)?;
+    }
+    Ok(best)
+}
 /// Sparse base members do not advance an inbox cursor. Complete image install
 /// is always partial until an ordinary contiguous delta/freshness transaction.
 #[derive(Clone, Copy, PartialEq, Eq)]

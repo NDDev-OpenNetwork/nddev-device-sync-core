@@ -49,6 +49,146 @@ fn history(head: u64) -> HistoryVersion {
     }
 }
 #[test]
+fn pressure_keeps_the_earliest_suffix_with_room_for_a_bounded_wave() {
+    let rows = (1..=8)
+        .map(|n| row(n, "shared", Some(n), 0))
+        .collect::<Vec<_>>();
+    let caps = RetentionCaps {
+        rows: 8,
+        ..RetentionCaps::default()
+    };
+    let next = row(9, "shared", Some(9), 0);
+    let plan = append_retention_plan(&rows, next, history(8), caps, 2).unwrap();
+    assert_eq!(plan.base, 4);
+    assert_eq!(plan.keep, (4..=9).collect::<Vec<_>>());
+    assert_eq!(plan.members, vec![4]);
+    assert_eq!(plan.entities, 1);
+    let published = HistoryVersion {
+        head: 9,
+        floor: plan.base,
+        base: plan.base,
+    };
+    assert_eq!(
+        admission(Lookup::Missing, next.version, published, false).unwrap(),
+        Admission::New
+    );
+    assert_eq!(
+        admission(Lookup::ExactOriginal, rows[3].version, published, false).unwrap(),
+        Admission::ReplayOriginal
+    );
+    assert!(
+        plan.base
+            <= match next.version {
+                OperationVersion::V3 { basis_seq, .. } => basis_seq,
+                _ => unreachable!(),
+            }
+    );
+}
+
+#[test]
+fn pressured_resolver_preserves_older_receipts_when_the_head_cut_is_unnecessary() {
+    let mut rows = (1..=8)
+        .map(|n| row(n, "shared", Some(n), 0))
+        .collect::<Vec<_>>();
+    rows.push(RetainedMeta {
+        decision: Decision::Conflict {
+            base_revision: 0,
+            current_revision: 8,
+        },
+        ..row(9, "shared", None, 0)
+    });
+    let caps = RetentionCaps {
+        rows: 9,
+        ..RetentionCaps::default()
+    };
+    let resolver = row(10, "shared", Some(9), 9);
+    let plan = append_retention_plan(&rows, resolver, history(9), caps, 2).unwrap();
+    assert_eq!(plan.base, 4);
+    assert_eq!(plan.keep, (4..=10).collect::<Vec<_>>());
+    assert!(plan.keep.contains(&9)); // Exact conflict replay is still possible.
+    assert!(matches!(
+        append_retention_plan(&rows, row(10, "shared", Some(9), 8), history(9), caps, 2),
+        Err(SyncError::Invalid)
+    ));
+    let failed = RetainedMeta {
+        decision: Decision::Conflict {
+            base_revision: 0,
+            current_revision: 8,
+        },
+        ..resolver
+    };
+    assert!(matches!(
+        append_retention_plan(&rows, failed, history(9), caps, 2),
+        Err(SyncError::KeyConflict)
+    ));
+    assert!(matches!(
+        append_retention_plan(
+            &rows,
+            RetainedMeta {
+                version: row(10, "shared", None, 0).version,
+                ..failed
+            },
+            history(9),
+            caps,
+            2
+        ),
+        Err(SyncError::CapacityExhausted)
+    ));
+}
+
+#[test]
+fn pressure_reserve_never_blocks_the_only_available_resolution() {
+    let rows = [
+        row(1, "a", Some(1), 0),
+        row(2, "a", None, 0),
+        row(3, "b", Some(1), 0),
+        row(4, "c", Some(1), 0),
+        row(5, "d", Some(1), 0),
+        row(6, "e", Some(1), 0),
+        row(7, "f", Some(1), 0),
+        row(8, "g", Some(1), 0),
+    ];
+    let plan = append_retention_plan(
+        &rows,
+        row(9, "a", Some(2), 2),
+        history(8),
+        RetentionCaps {
+            rows: 8,
+            ..RetentionCaps::default()
+        },
+        2,
+    )
+    .unwrap();
+    assert_eq!(plan.base, 9);
+    assert_eq!(plan.keep, (3..=9).collect::<Vec<_>>());
+    assert_eq!(plan.entities, 7);
+}
+
+#[test]
+fn pressure_reserves_encoded_bytes_without_relaxing_the_hard_budget() {
+    let full = |n| RetainedMeta {
+        request_bytes: MAX_OPERATION_BYTES as u32,
+        result_bytes: MAX_RESULT_BYTES as u32,
+        ..row(n, "shared", Some(n), 0)
+    };
+    let rows = (1..=8).map(full).collect::<Vec<_>>();
+    let cost = full(1).cost();
+    let plan = append_retention_plan(
+        &rows,
+        full(9),
+        history(8),
+        RetentionCaps {
+            bytes: 8 * cost,
+            ..RetentionCaps::default()
+        },
+        1,
+    )
+    .unwrap();
+    assert_eq!(plan.base, 3);
+    assert_eq!(plan.bytes, 7 * cost);
+    assert_eq!(plan.keep, (3..=9).collect::<Vec<_>>());
+}
+#[test]
 fn v2_exact_aad_and_v3_metadata_before_encryption_share_one_validator() {
     let mut op = operation();
     op.payload.ciphertext.clear();
