@@ -5,6 +5,7 @@
 //! role, cached membership or supplied tenant ID is not an authority source.
 use crate::identity::Owner;
 
+pub mod commands;
 pub mod invitations;
 
 #[derive(Clone, Eq, PartialEq)]
@@ -98,6 +99,12 @@ pub enum OrganizationError {
     InvalidState,
     #[error("company_invitation_unavailable")]
     InvitationUnavailable,
+    #[error("company_command_expired")]
+    CommandExpired,
+    #[error("company_capacity_reached")]
+    Busy,
+    #[error("company_dependency_unavailable")]
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

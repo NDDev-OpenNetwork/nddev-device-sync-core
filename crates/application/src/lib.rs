@@ -4,6 +4,7 @@
 pub mod devices;
 pub mod identity;
 pub mod lifecycle;
+pub mod organizations;
 pub mod replica;
 pub mod repositories;
 pub mod sync;
