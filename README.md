@@ -48,6 +48,14 @@ Native key proof, authenticated transactions, capture permission and transport
 belong to adapters. Restored screen metadata alone never authorizes capture;
 clients must revalidate their current Accounts lifetime before using it.
 
+`domain::organizations` owns company membership, owner-only personal access,
+the same-company administrative RDS exception and last-administrator protection.
+The server must load current membership and lock company membership changes
+before applying these rules. The public contract is intended for the organizations
+adapter and server migration; its presence does not enable multi-user runtime
+behavior in an older server. Tenant IDs remain company IDs and personal keys
+remain user-owned.
+
 ## Verification
 
 ```sh
