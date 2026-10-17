@@ -6,8 +6,8 @@ use crate::{
     sync::{SignedRequest, active},
 };
 use nddev_device_sync_domain::{
-    DeviceId, Platform,
-    devices::{Device, DeviceStatus},
+    DeviceId, Platform, UserId,
+    devices::{Device, DeviceName, DevicePlatform, DeviceStatus},
     identity::AuthenticatedSession,
     organizations::Membership,
     screen::{
@@ -295,6 +295,15 @@ pub fn native_grant_payload(bytes: &[u8]) -> Result<(), ScreenError> {
     Ok(())
 }
 
+/// Minimal transient discovery data. Registration is not online presence or
+/// permission to capture; a fresh binding and explicit host consent remain required.
+pub struct ScreenTarget {
+    pub device: DeviceId,
+    pub name: DeviceName,
+    pub platform: DevicePlatform,
+    pub registered: bool,
+}
+
 /// Canonical server control port, not a native grant/registry framework.
 /// Every operation uses the existing identity/device authorization transaction:
 /// recheck exact live session, enrolled key/device/owner, binding revisions and
@@ -323,6 +332,17 @@ pub fn native_grant_payload(bytes: &[u8]) -> Result<(), ScreenError> {
 /// matching old binding; ending an already ended/expired intent is idempotent.
 /// No key, frame, sequence, capture authority or per-frame receipt is durable.
 pub trait ScreenStore: Send + Sync {
+    /// Read at most MAX_ACTIVE_DEVICES for one selected active member of the
+    /// authenticated company. Recheck Membership::authorize_screen under the
+    /// same lock as device/session revocation. Never return personal inventory
+    /// keys, creation history, revoked devices or another company's membership.
+    fn targets(
+        &self,
+        auth: &AuthenticatedSession,
+        signed: SignedRequest,
+        user: &UserId,
+        now_ms: u64,
+    ) -> impl Future<Output = Result<Vec<ScreenTarget>, ScreenError>> + Send;
     /// Read the target's current binding before creating a view. The requester
     /// must own its active device; current memberships must authorize viewing
     /// the active target under the same-company screen policy.
