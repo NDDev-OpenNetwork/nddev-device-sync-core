@@ -60,10 +60,39 @@ pub enum DeliveryState {
     Failed,
     Unknown,
 }
+impl DeliveryState {
+    /// A lost worker/SMTP result is uncertainty, never proof of non-delivery.
+    /// Actual provider acceptance may subsequently replace this observation.
+    pub fn observe(self, issued_at_ms: u64, now: u64) -> Self {
+        if self == Self::Pending && now >= issued_at_ms.saturating_add(DELIVERY_LIFETIME_MS) {
+            Self::Unknown
+        } else {
+            self
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn absent_delivery_ack_is_bounded_uncertainty_without_resend_authority() {
+        assert_eq!(
+            DeliveryState::Pending.observe(1000, 300999),
+            DeliveryState::Pending
+        );
+        assert_eq!(
+            DeliveryState::Pending.observe(1000, 301000),
+            DeliveryState::Unknown
+        );
+        assert_eq!(
+            DeliveryState::Unknown.observe(1000, 999),
+            DeliveryState::Unknown
+        );
+        for state in [DeliveryState::Accepted, DeliveryState::Failed] {
+            assert_eq!(state.observe(1000, u64::MAX), state);
+        }
+    }
     #[test]
     fn command_expiry_cannot_be_renewed_after_receipt_cleanup() {
         let command = CommandId::new("0000000f-4240-7000-8000-000000000001".into()).unwrap();

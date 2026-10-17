@@ -128,7 +128,9 @@ impl Invitation {
         Ok(())
     }
 
-    fn observe_expiry(&mut self, now: u64) -> Result<(), OrganizationError> {
+    /// Persist this observation when projecting or mutating retained metadata;
+    /// expiry never depends on a background task and cannot be rolled back.
+    pub fn observe_expiry(&mut self, now: u64) -> Result<(), OrganizationError> {
         if now < self.0.issued_at_ms {
             return Err(OrganizationError::InvitationUnavailable);
         }
