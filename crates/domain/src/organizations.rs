@@ -5,6 +5,8 @@
 //! role, cached membership or supplied tenant ID is not an authority source.
 use crate::identity::Owner;
 
+pub mod invitations;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompanyRole {
     Admin,
@@ -22,12 +24,16 @@ pub struct Membership {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OrganizationError {
+    #[error("company_input_invalid")]
+    InvalidInput,
     #[error("company_access_denied")]
     Denied,
     #[error("company_last_administrator")]
     LastAdministrator,
     #[error("company_membership_state_invalid")]
     InvalidState,
+    #[error("company_invitation_unavailable")]
+    InvitationUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

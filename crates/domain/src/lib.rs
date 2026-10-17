@@ -54,6 +54,7 @@ id_type!(ModuleId);
 id_type!(UserId);
 id_type!(TenantId);
 id_type!(DeviceId);
+id_type!(InvitationId);
 
 pub mod devices;
 pub mod identity;
