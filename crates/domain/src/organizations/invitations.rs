@@ -80,9 +80,26 @@ impl Invitation {
         current_issuer: &Membership,
         now: u64,
     ) -> Result<Membership, OrganizationError> {
+        self.prepare_authentication(verified_recipient, current_issuer, now)?;
+        self.0.status = InvitationStatus::Accepted;
+        Ok(Membership {
+            owner: self.0.recipient.clone(),
+            role: self.0.role,
+            active: true,
+        })
+    }
+
+    /// A valid invitation may start recipient authentication; it does not itself
+    /// create membership. The adapter checks its token and intended email first.
+    pub fn prepare_authentication(
+        &mut self,
+        intended_recipient: &Owner,
+        current_issuer: &Membership,
+        now: u64,
+    ) -> Result<(), OrganizationError> {
         self.observe_expiry(now)?;
         if self.0.status != InvitationStatus::Pending
-            || verified_recipient != &self.0.recipient
+            || intended_recipient != &self.0.recipient
             || current_issuer.owner != self.0.issuer
         {
             return Err(OrganizationError::InvitationUnavailable);
@@ -90,12 +107,7 @@ impl Invitation {
         current_issuer
             .authorize_administration(&self.0.issuer, &self.0.recipient.tenant_id)
             .map_err(|_| OrganizationError::InvitationUnavailable)?;
-        self.0.status = InvitationStatus::Accepted;
-        Ok(Membership {
-            owner: self.0.recipient.clone(),
-            role: self.0.role,
-            active: true,
-        })
+        Ok(())
     }
 
     /// Revoking an accepted invitation cannot remove an established member.

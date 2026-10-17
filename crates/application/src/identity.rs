@@ -1,7 +1,7 @@
 //! Owner authentication use cases. Stores implement the documented atomic
 //! boundaries; adapters own cryptography, time sources, delivery and provider I/O.
 pub use nddev_device_sync_domain::identity::*;
-pub use nddev_device_sync_domain::{TenantId, UserId};
+pub use nddev_device_sync_domain::{InvitationId, TenantId, UserId};
 use std::future::Future;
 
 pub struct EmailIssue {
@@ -10,10 +10,21 @@ pub struct EmailIssue {
     /// Existing protected email binding; the store resolves the active user
     /// inside issuance, never from a caller-provided user or company ID.
     pub owner_binding: ProtectedDigest,
+    pub invitation: Option<InvitationProof>,
     pub source: ProtectedDigest,
     pub verifier: ProtectedDigest,
     pub challenge: OtpChallenge,
     pub created_at_ms: u64,
+}
+
+pub struct InvitationClaim {
+    pub id: InvitationId,
+    pub token: SecretText,
+}
+
+pub struct InvitationProof {
+    pub id: InvitationId,
+    pub verifier: ProtectedDigest,
 }
 
 /// A fresh token's protected binding before the store has authenticated its
@@ -249,6 +260,49 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
         locale: Locale,
         now: u64,
     ) -> Result<EmailReceipt, IdentityError> {
+        self.request_email_for(address, None, source, locale, now)
+            .await
+    }
+
+    pub async fn request_invitation_email(
+        &self,
+        address: &str,
+        claim: InvitationClaim,
+        source: &[u8],
+        locale: Locale,
+        now: u64,
+    ) -> Result<EmailReceipt, IdentityError> {
+        if !valid_opaque(claim.id.as_str()) || !valid_opaque(claim.token.expose()) {
+            return Err(IdentityError::InvalidInput);
+        }
+        let verifier = self.crypto.protect(
+            "company_invitation",
+            &[
+                claim.id.as_str().as_bytes(),
+                claim.token.expose().as_bytes(),
+            ],
+        );
+        self.request_email_for(
+            address,
+            Some(InvitationProof {
+                id: claim.id,
+                verifier,
+            }),
+            source,
+            locale,
+            now,
+        )
+        .await
+    }
+
+    async fn request_email_for(
+        &self,
+        address: &str,
+        invitation: Option<InvitationProof>,
+        source: &[u8],
+        locale: Locale,
+        now: u64,
+    ) -> Result<EmailReceipt, IdentityError> {
         if !self.email.available() {
             return Err(IdentityError::Unavailable);
         }
@@ -265,6 +319,7 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
             owner_binding: self
                 .crypto
                 .protect("owner_binding", &[address.as_str().as_bytes()]),
+            invitation,
             verifier: self
                 .crypto
                 .protect("email_code", &[id.as_bytes(), code.expose().as_bytes()]),
