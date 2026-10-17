@@ -244,7 +244,9 @@ pub const START_RATE: RatePolicy = RatePolicy {
     window_ms: 900_000,
 };
 pub const SUBJECT_RATE: RatePolicy = RatePolicy {
-    limit: 5,
+    // A user may authenticate all32 devices within an hour. This budgets code
+    // issuance, not guesses: resend spacing and five verification attempts stay.
+    limit: 32,
     window_ms: 3_600_000,
 };
 pub const VERIFY_RATE: RatePolicy = RatePolicy {
@@ -636,5 +638,26 @@ mod tests {
         }
         assert_eq!(window.admit(2, START_RATE), Err(IdentityError::RateLimited));
         assert!(window.admit(1 + START_RATE.window_ms, START_RATE).is_ok());
+    }
+
+    #[test]
+    fn fleet_email_issuance_does_not_expand_otp_verification_attempts() {
+        let mut issuance = RateWindow::default();
+        for device in 0..32 {
+            assert!(
+                issuance
+                    .admit(1000 + device * OTP_RESEND_MS, SUBJECT_RATE)
+                    .is_ok()
+            );
+        }
+        assert_eq!(
+            issuance.admit(1000 + 32 * OTP_RESEND_MS, SUBJECT_RATE),
+            Err(IdentityError::RateLimited)
+        );
+        let mut proof = OtpChallenge::new(1000, true).unwrap();
+        for _ in 0..5 {
+            assert_eq!(proof.consume(1001, false), Err(IdentityError::Denied));
+        }
+        assert_eq!(proof.consume(1002, true), Err(IdentityError::Denied));
     }
 }
