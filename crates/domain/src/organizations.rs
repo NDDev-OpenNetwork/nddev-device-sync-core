@@ -5,6 +5,69 @@
 //! role, cached membership or supplied tenant ID is not an authority source.
 use crate::identity::Owner;
 
+pub mod commands;
+pub mod invitations;
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct CompanyName(String);
+impl CompanyName {
+    pub fn new(value: String) -> Result<Self, OrganizationError> {
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > 128
+            || value.chars().any(char::is_control)
+        {
+            return Err(OrganizationError::InvalidInput);
+        }
+        Ok(Self(value))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone)]
+pub struct Company {
+    pub id: crate::TenantId,
+    pub name: CompanyName,
+    pub revision: u64,
+}
+impl Company {
+    pub fn new(
+        id: crate::TenantId,
+        name: CompanyName,
+        revision: u64,
+    ) -> Result<Self, OrganizationError> {
+        if !(1..=crate::sync::MAX_REVISION).contains(&revision) {
+            return Err(OrganizationError::InvalidState);
+        }
+        Ok(Self { id, name, revision })
+    }
+    pub fn rename(
+        &self,
+        member: &Membership,
+        actor: &Owner,
+        expected_revision: u64,
+        name: CompanyName,
+    ) -> Result<Self, OrganizationError> {
+        member.authorize_administration(actor, &self.id)?;
+        if expected_revision != self.revision {
+            return Err(OrganizationError::Conflict);
+        }
+        if name == self.name {
+            return Ok(self.clone());
+        }
+        Self::new(
+            self.id.clone(),
+            name,
+            self.revision
+                .checked_add(1)
+                .filter(|revision| *revision <= crate::sync::MAX_REVISION)
+                .ok_or(OrganizationError::RevisionExhausted)?,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompanyRole {
     Admin,
@@ -22,12 +85,28 @@ pub struct Membership {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OrganizationError {
+    #[error(transparent)]
+    Authorization(#[from] crate::sync::SyncError),
+    #[error("company_input_invalid")]
+    InvalidInput,
+    #[error("company_revision_conflict")]
+    Conflict,
+    #[error("company_revision_exhausted")]
+    RevisionExhausted,
     #[error("company_access_denied")]
     Denied,
     #[error("company_last_administrator")]
     LastAdministrator,
     #[error("company_membership_state_invalid")]
     InvalidState,
+    #[error("company_invitation_unavailable")]
+    InvitationUnavailable,
+    #[error("company_command_expired")]
+    CommandExpired,
+    #[error("company_capacity_reached")]
+    Busy,
+    #[error("company_dependency_unavailable")]
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,6 +214,79 @@ mod tests {
             role,
             active,
         }
+    }
+
+    #[test]
+    fn company_name_changes_require_current_scope_and_compare_revision() {
+        let admin = member("a", "admin", CompanyRole::Admin, true);
+        let user = member("a", "user", CompanyRole::User, true);
+        let company = Company::new(
+            admin.owner.tenant_id.clone(),
+            CompanyName::new("Original".into()).unwrap(),
+            3,
+        )
+        .unwrap();
+        assert!(matches!(
+            company.rename(
+                &user,
+                &user.owner,
+                3,
+                CompanyName::new("Changed".into()).unwrap()
+            ),
+            Err(OrganizationError::Denied)
+        ));
+        assert!(matches!(
+            company.rename(
+                &admin,
+                &admin.owner,
+                2,
+                CompanyName::new("Changed".into()).unwrap()
+            ),
+            Err(OrganizationError::Conflict)
+        ));
+        let renamed = company
+            .rename(
+                &admin,
+                &admin.owner,
+                3,
+                CompanyName::new("Changed".into()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(renamed.id, company.id);
+        assert_eq!(renamed.revision, 4);
+        assert_eq!(renamed.name.as_str(), "Changed");
+        assert_eq!(
+            renamed
+                .rename(
+                    &admin,
+                    &admin.owner,
+                    4,
+                    CompanyName::new("Changed".into()).unwrap()
+                )
+                .unwrap()
+                .revision,
+            4
+        );
+        let final_revision =
+            Company::new(company.id, company.name, crate::sync::MAX_REVISION).unwrap();
+        assert!(matches!(
+            final_revision.rename(
+                &admin,
+                &admin.owner,
+                crate::sync::MAX_REVISION,
+                CompanyName::new("Changed".into()).unwrap()
+            ),
+            Err(OrganizationError::RevisionExhausted)
+        ));
+        for invalid in [
+            String::new(),
+            " padded".into(),
+            "new\nline".into(),
+            "x".repeat(129),
+        ] {
+            assert!(CompanyName::new(invalid).is_err());
+        }
+        assert!(CompanyName::new("🚀".repeat(128)).is_ok());
     }
 
     #[test]

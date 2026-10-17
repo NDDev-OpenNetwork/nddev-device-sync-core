@@ -6,9 +6,10 @@ use crate::{
     sync::{SignedRequest, active},
 };
 use nddev_device_sync_domain::{
-    DeviceId, Platform,
-    devices::{Device, DeviceStatus},
+    DeviceId, Platform, UserId,
+    devices::{Device, DeviceName, DevicePlatform, DeviceStatus},
     identity::AuthenticatedSession,
+    organizations::Membership,
     screen::{
         ENDPOINT_PROOF_MS, EndpointBinding, MAX_NATIVE_GRANT_BYTES, ScreenError, ViewIntent,
         ViewLease, ViewPermit, ViewProjection, endpoint_signing_bytes,
@@ -113,6 +114,9 @@ pub struct ViewRequest {
 pub struct ViewRows<'a> {
     pub viewer: &'a Device,
     pub host: &'a Device,
+    /// Current memberships read under the same lock as devices and sessions.
+    pub viewer_membership: &'a Membership,
+    pub host_membership: &'a Membership,
     pub viewer_binding: &'a EndpointBinding,
     pub host_binding: &'a EndpointBinding,
     /// Queried under the same authorization/admission lock. At most two
@@ -120,9 +124,15 @@ pub struct ViewRows<'a> {
     pub viewer_active: Option<&'a ViewIntent>,
     pub host_active: Option<&'a ViewIntent>,
 }
-fn current_pair(auth: &AuthenticatedSession, rows: &ViewRows<'_>) -> bool {
-    owned_active(auth, rows.viewer)
-        && owned_active(auth, rows.host)
+fn current_pair(rows: &ViewRows<'_>) -> bool {
+    rows.viewer.status == DeviceStatus::Active
+        && rows.host.status == DeviceStatus::Active
+        && rows.viewer_membership.owner == rows.viewer.owner
+        && rows.host_membership.owner == rows.host.owner
+        && rows
+            .viewer_membership
+            .authorize_screen(&rows.viewer.owner, rows.host_membership)
+            .is_ok()
         && rows.viewer.id != rows.host.id
         && rows.viewer_binding.device == rows.viewer.id
         && rows.host_binding.device == rows.host.id
@@ -140,7 +150,8 @@ pub fn authorize_view(
     now_ms: u64,
 ) -> Result<ViewPermit, ScreenError> {
     active(auth, signed, now_ms).map_err(|_| ScreenError::Denied)?;
-    if !current_pair(auth, &rows)
+    if !current_pair(&rows)
+        || !owned_active(auth, rows.viewer)
         || signed.device != rows.viewer.id
         || request.target != rows.host.id
         || request.viewer_revision != rows.viewer_binding.revision
@@ -208,7 +219,14 @@ pub fn revalidate_view(
     now_ms: u64,
 ) -> Result<(), ScreenError> {
     active(auth, signed, now_ms).map_err(|_| ScreenError::Denied)?;
-    if !current_pair(auth, &rows)
+    if !current_pair(&rows)
+        || !owned_active(
+            auth,
+            match actor {
+                ViewActor::Viewer => rows.viewer,
+                ViewActor::Host => rows.host,
+            },
+        )
         || (&signed.device
             != match actor {
                 ViewActor::Viewer => &permit.viewer,
@@ -277,6 +295,15 @@ pub fn native_grant_payload(bytes: &[u8]) -> Result<(), ScreenError> {
     Ok(())
 }
 
+/// Minimal transient discovery data. Registration is not online presence or
+/// permission to capture; a fresh binding and explicit host consent remain required.
+pub struct ScreenTarget {
+    pub device: DeviceId,
+    pub name: DeviceName,
+    pub platform: DevicePlatform,
+    pub registered: bool,
+}
+
 /// Canonical server control port, not a native grant/registry framework.
 /// Every operation uses the existing identity/device authorization transaction:
 /// recheck exact live session, enrolled key/device/owner, binding revisions and
@@ -305,8 +332,20 @@ pub fn native_grant_payload(bytes: &[u8]) -> Result<(), ScreenError> {
 /// matching old binding; ending an already ended/expired intent is idempotent.
 /// No key, frame, sequence, capture authority or per-frame receipt is durable.
 pub trait ScreenStore: Send + Sync {
+    /// Read at most MAX_ACTIVE_DEVICES for one selected active member of the
+    /// authenticated company. Recheck Membership::authorize_screen under the
+    /// same lock as device/session revocation. Never return personal inventory
+    /// keys, creation history, revoked devices or another company's membership.
+    fn targets(
+        &self,
+        auth: &AuthenticatedSession,
+        signed: SignedRequest,
+        user: &UserId,
+        now_ms: u64,
+    ) -> impl Future<Output = Result<Vec<ScreenTarget>, ScreenError>> + Send;
     /// Read the target's current binding before creating a view. The requester
-    /// and target must both be active devices owned by the current session.
+    /// must own its active device; current memberships must authorize viewing
+    /// the active target under the same-company screen policy.
     /// A missing binding is unavailable screen capability, not a new identity.
     fn binding(
         &self,
@@ -378,6 +417,8 @@ mod tests {
         signed: SignedRequest,
         viewer: Device,
         host: Device,
+        viewer_membership: Membership,
+        host_membership: Membership,
         viewer_binding: EndpointBinding,
         host_binding: EndpointBinding,
     }
@@ -398,7 +439,14 @@ mod tests {
             };
             let viewer = device("viewer");
             let host = device("host");
+            let membership = Membership {
+                owner: owner.clone(),
+                role: nddev_device_sync_domain::organizations::CompanyRole::User,
+                active: true,
+            };
             Self {
+                viewer_membership: membership.clone(),
+                host_membership: membership,
                 auth: AuthenticatedSession {
                     session: Session::new(owner, AuthMethod::EmailOtp, 1000).unwrap(),
                     binding: ProtectedDigest([1; 32]),
@@ -429,6 +477,8 @@ mod tests {
             ViewRows {
                 viewer: &self.viewer,
                 host: &self.host,
+                viewer_membership: &self.viewer_membership,
+                host_membership: &self.host_membership,
                 viewer_binding: &self.viewer_binding,
                 host_binding: &self.host_binding,
                 viewer_active: None,
@@ -680,6 +730,114 @@ mod tests {
             Err(ScreenError::Expired)
         );
     }
+    #[test]
+    fn company_admin_can_view_another_active_member_without_transferring_device_ownership() {
+        use nddev_device_sync_domain::organizations::CompanyRole;
+        let mut c = Case::new();
+        c.host.owner.user_id = UserId::new("member").unwrap();
+        c.host_membership.owner = c.host.owner.clone();
+        assert!(c.permit().is_err()); // ordinary users retain only own-device access
+        c.viewer_membership.role = CompanyRole::Admin;
+        let permit = c.permit().unwrap();
+        assert_eq!(c.host.owner.user_id.as_str(), "member");
+        let host_auth = AuthenticatedSession {
+            session: Session::new(c.host.owner.clone(), AuthMethod::EmailOtp, 1000).unwrap(),
+            binding: ProtectedDigest([9; 32]),
+        };
+        let host_signed = SignedRequest {
+            device: c.host.id.clone(),
+            nonce: c.signed.nonce.clone(),
+            expires_at_ms: c.signed.expires_at_ms,
+            fingerprint: c.signed.fingerprint,
+        };
+        revalidate_view(
+            &host_auth,
+            &host_signed,
+            c.rows(),
+            &permit,
+            ViewActor::Host,
+            1500,
+        )
+        .unwrap();
+        assert!(
+            revalidate_view(
+                &c.auth,
+                &host_signed,
+                c.rows(),
+                &permit,
+                ViewActor::Host,
+                1500
+            )
+            .is_err()
+        );
+        c.viewer_membership.role = CompanyRole::User;
+        assert!(
+            revalidate_view(
+                &c.auth,
+                &c.signed,
+                c.rows(),
+                &permit,
+                ViewActor::Viewer,
+                1500
+            )
+            .is_err()
+        );
+        assert!(
+            revalidate_view(
+                &host_auth,
+                &host_signed,
+                c.rows(),
+                &permit,
+                ViewActor::Host,
+                1500
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn screen_pair_rejects_foreign_inactive_or_unbound_membership_facts() {
+        use nddev_device_sync_domain::organizations::CompanyRole;
+        let mut c = Case::new();
+        c.viewer_membership.role = CompanyRole::Admin;
+        c.host.owner.user_id = UserId::new("member").unwrap();
+        // A supplied membership for the old owner is not authority over this device.
+        assert!(c.permit().is_err());
+        c.host_membership.owner = c.host.owner.clone();
+        let permit = c.permit().unwrap();
+        c.host_membership.active = false;
+        assert!(c.permit().is_err());
+        assert!(
+            revalidate_view(
+                &c.auth,
+                &c.signed,
+                c.rows(),
+                &permit,
+                ViewActor::Viewer,
+                1500
+            )
+            .is_err()
+        );
+        c.host_membership.active = true;
+        c.viewer_membership.active = false;
+        assert!(c.permit().is_err());
+        c.viewer_membership.active = true;
+        c.host.owner.tenant_id = TenantId::new("foreign").unwrap();
+        c.host_membership.owner = c.host.owner.clone();
+        assert!(c.permit().is_err());
+        assert!(
+            revalidate_view(
+                &c.auth,
+                &c.signed,
+                c.rows(),
+                &permit,
+                ViewActor::Viewer,
+                1500
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn host_needs_actual_local_guard_matching_endpoint_display_and_lifecycle() {
         let c = Case::new();
