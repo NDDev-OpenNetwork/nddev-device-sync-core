@@ -6,7 +6,8 @@ use std::future::Future;
 pub struct EnrollmentIssue {
     pub authorization: AuthenticatedSession,
     pub challenge: EnrollmentChallenge,
-    pub source: ProtectedDigest,
+    /// Protected authenticated tenant/user key; never a shared NAT address.
+    pub owner_rate_key: ProtectedDigest,
 }
 
 pub struct EnrollmentInput {
@@ -112,7 +113,13 @@ impl<S: DeviceStore, C: EnrollmentCrypto> DeviceService<S, C> {
                 EnrollmentIssue {
                     authorization: authorization.clone(),
                     challenge,
-                    source: self.crypto.protect("device_enrollment_source", &[source]),
+                    owner_rate_key: self.crypto.protect(
+                        "device_enrollment_owner",
+                        &[
+                            authorization.session.owner.tenant_id.as_str().as_bytes(),
+                            authorization.session.owner.user_id.as_str().as_bytes(),
+                        ],
+                    ),
                 },
                 now,
             )
