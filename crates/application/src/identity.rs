@@ -4,6 +4,13 @@ pub use nddev_device_sync_domain::identity::*;
 pub use nddev_device_sync_domain::{InvitationId, TenantId, UserId};
 use std::future::Future;
 
+/// Operator control is a deployment binding, not a company role. The adapter
+/// supplies its verified configured principal and rechecks active membership,
+/// device/session and nonce under the same authorization transaction.
+pub fn is_configured_operator(auth: &AuthenticatedSession, configured: &Owner, now: u64) -> bool {
+    auth.session.active(now) && &auth.session.owner == configured
+}
+
 pub struct EmailIssue {
     pub id: String,
     pub subject: ProtectedDigest,
@@ -591,4 +598,44 @@ pub fn valid_opaque(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use super::*;
+    #[test]
+    fn company_membership_cannot_grant_the_configured_operator_binding() {
+        let configured = Owner {
+            user_id: UserId::new("operator").unwrap(),
+            tenant_id: TenantId::new("company").unwrap(),
+        };
+        for (owner, allowed) in [
+            (configured.clone(), true),
+            (
+                Owner {
+                    user_id: UserId::new("another-admin").unwrap(),
+                    tenant_id: configured.tenant_id.clone(),
+                },
+                false,
+            ),
+            (
+                Owner {
+                    user_id: configured.user_id.clone(),
+                    tenant_id: TenantId::new("other-company").unwrap(),
+                },
+                false,
+            ),
+        ] {
+            let auth = AuthenticatedSession {
+                binding: ProtectedDigest([1; 32]),
+                session: Session::new(owner, AuthMethod::EmailOtp, 1000).unwrap(),
+            };
+            assert_eq!(is_configured_operator(&auth, &configured, 1000), allowed);
+            assert!(!is_configured_operator(
+                &auth,
+                &configured,
+                auth.session.expires_at_ms
+            ));
+        }
+    }
 }
