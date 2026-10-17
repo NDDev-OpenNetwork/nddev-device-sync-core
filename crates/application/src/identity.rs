@@ -7,10 +7,28 @@ use std::future::Future;
 pub struct EmailIssue {
     pub id: String,
     pub subject: ProtectedDigest,
+    /// Existing protected email binding; the store resolves the active user
+    /// inside issuance, never from a caller-provided user or company ID.
+    pub owner_binding: ProtectedDigest,
     pub source: ProtectedDigest,
     pub verifier: ProtectedDigest,
     pub challenge: OtpChallenge,
     pub created_at_ms: u64,
+}
+
+/// A fresh token's protected binding before the store has authenticated its
+/// principal. Email consumption resolves the owner from its retained challenge.
+pub struct SessionSeed {
+    pub digest: ProtectedDigest,
+    pub issued_at_ms: u64,
+}
+impl SessionSeed {
+    pub fn issue(self, owner: Owner, method: AuthMethod) -> Result<SessionIssue, IdentityError> {
+        Ok(SessionIssue {
+            digest: self.digest,
+            session: Session::new(owner, method, self.issued_at_ms)?,
+        })
+    }
 }
 
 pub struct SessionIssue {
@@ -59,16 +77,12 @@ pub enum GithubExchange {
     Session(IssuedSession),
 }
 
-/// The operator's explicit binding, after persistence has fixed the stable IDs.
-pub struct IdentityBinding {
-    pub owner: Owner,
-    pub email: EmailAddress,
-    pub github_id: Option<u64>,
-}
-
 pub trait IdentityStore: Send + Sync {
     /// A false result has the same public receipt, but no mail is queued. Issue,
     /// source/subject limits, capacity and invalidating prior codes are atomic.
+    /// Resolve owner_binding against current active membership, bind the retained
+    /// challenge to that owner, and set eligibility under the transaction. The
+    /// supplied challenge contains timing/attempt bounds, not authorization.
     fn issue_email(
         &self,
         issue: EmailIssue,
@@ -76,19 +90,33 @@ pub trait IdentityStore: Send + Sync {
     fn invalidate_email(&self, id: &str) -> impl Future<Output = Result<(), IdentityError>> + Send;
     /// Verify in constant time, run OtpChallenge::consume under the row lock,
     /// persist failed attempts, and consume+create session in one transaction.
+    /// Resolve the owner from the retained challenge and recheck active membership;
+    /// the seed contains no owner selected by an unverified request.
     fn consume_email(
         &self,
         id: &str,
         verifier: ProtectedDigest,
         source: ProtectedDigest,
-        issue: SessionIssue,
+        issue: SessionSeed,
         now: u64,
     ) -> impl Future<Output = Result<Session, IdentityError>> + Send;
-    fn create_session(
+    /// Lookup only an explicitly bound, active principal. Provider email/name
+    /// cannot substitute for this stable numeric binding.
+    fn github_owner(
         &self,
-        issue: SessionIssue,
+        provider_id: u64,
+        now: u64,
+    ) -> impl Future<Output = Result<Option<Owner>, IdentityError>> + Send;
+    /// Recheck the exact approved owner/provider binding and active membership
+    /// transactionally; a changed binding cannot retarget a pending approval.
+    fn create_github_session(
+        &self,
+        identity: VerifiedGithubIdentity,
+        issue: SessionSeed,
         now: u64,
     ) -> impl Future<Output = Result<Session, IdentityError>> + Send;
+    /// Return only a live session whose principal still has active membership.
+    /// Cached roles or a process-wide bootstrap identity are not authorization.
     fn session(
         &self,
         digest: ProtectedDigest,
@@ -151,7 +179,7 @@ pub trait GithubFlowStore: Send + Sync {
     fn complete_callback(
         &self,
         id: &str,
-        proof: Option<BrowserProof>,
+        approval: Option<GithubApproval>,
         now: u64,
     ) -> Result<ApprovalDisplay, IdentityError>;
     /// Both digests are compared in constant time. Approval is one-use and
@@ -179,51 +207,34 @@ pub struct IdentityService<S, C, E, G, F> {
     email: E,
     github: G,
     flows: F,
-    owner: Owner,
-    owner_email: EmailAddress,
-    owner_github_id: Option<u64>,
 }
 
 impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F: GithubFlowStore>
     IdentityService<S, C, E, G, F>
 {
-    pub fn new(
-        store: S,
-        crypto: C,
-        email: E,
-        github: G,
-        flows: F,
-        binding: IdentityBinding,
-    ) -> Self {
+    pub fn new(store: S, crypto: C, email: E, github: G, flows: F) -> Self {
         Self {
             store,
             crypto,
             email,
             github,
             flows,
-            owner: binding.owner,
-            owner_email: binding.email,
-            owner_github_id: binding.github_id,
         }
     }
     pub fn methods(&self) -> (bool, bool) {
-        (
-            self.email.available(),
-            self.owner_github_id.is_some() && self.github.available(),
-        )
+        (self.email.available(), self.github.available())
     }
-    fn session_issue(
-        &self,
-        method: AuthMethod,
-        now: u64,
-    ) -> Result<(SecretText, SessionIssue), IdentityError> {
+    fn session_seed(&self, now: u64) -> Result<(SecretText, SessionSeed), IdentityError> {
+        // Reject an impossible issuance time before generating or storing work.
+        now.checked_add(SESSION_LIFETIME_MS)
+            .ok_or(IdentityError::InvalidInput)?;
         let token = self.crypto.token()?;
         let digest = self.crypto.protect("session", &[token.expose().as_bytes()]);
         Ok((
             token,
-            SessionIssue {
+            SessionSeed {
                 digest,
-                session: Session::new(self.owner.clone(), method, now)?,
+                issued_at_ms: now,
             },
         ))
     }
@@ -244,13 +255,16 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
         let address = EmailAddress::parse(address)?;
         let id = self.crypto.token()?.into_inner();
         let code = self.crypto.otp()?;
-        let challenge = OtpChallenge::new(now, address == self.owner_email)?;
+        let challenge = OtpChallenge::new(now, false)?;
         let issue = EmailIssue {
             id: id.clone(),
             source: self.source("email_source", source),
             subject: self
                 .crypto
                 .protect("email_subject", &[address.as_str().as_bytes()]),
+            owner_binding: self
+                .crypto
+                .protect("owner_binding", &[address.as_str().as_bytes()]),
             verifier: self
                 .crypto
                 .protect("email_code", &[id.as_bytes(), code.expose().as_bytes()]),
@@ -258,12 +272,11 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
             created_at_ms: now,
         };
         if self.store.issue_email(issue).await?
-            && challenge.eligible
             && self
                 .email
                 .queue(EmailMessage {
                     challenge_id: id.clone(),
-                    recipient: self.owner_email.clone(),
+                    recipient: address,
                     code,
                     expires_at_ms: challenge.expires_at_ms,
                     locale,
@@ -291,7 +304,7 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
         if !valid_opaque(id) || code.len() != 8 || !code.bytes().all(|b| b.is_ascii_digit()) {
             return Err(IdentityError::InvalidInput);
         }
-        let (token, issue) = self.session_issue(AuthMethod::EmailOtp, now)?;
+        let (token, issue) = self.session_seed(now)?;
         let verifier = self
             .crypto
             .protect("email_code", &[id.as_bytes(), code.as_bytes()]);
@@ -381,16 +394,25 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
             }
             None => Err(IdentityError::Denied),
         };
-        let permitted = result
-            .as_ref()
-            .is_ok_and(|id| Some(*id) == self.owner_github_id);
-        if !permitted {
-            let display = self.flows.complete_callback(&id, None, now)?;
-            return match result {
-                Err(IdentityError::Unavailable) => Err(IdentityError::Unavailable),
-                _ => Ok(GithubCallback::Complete(display.locale)),
-            };
-        }
+        let verified = match result {
+            Ok(provider_id) if provider_id > 0 => self
+                .store
+                .github_owner(provider_id, now)
+                .await
+                .map(|owner| owner.map(|owner| VerifiedGithubIdentity { provider_id, owner })),
+            Ok(_) => Ok(None),
+            Err(error) => Err(error),
+        };
+        let identity = match verified {
+            Ok(Some(identity)) => identity,
+            other => {
+                let display = self.flows.complete_callback(&id, None, now)?;
+                return match other {
+                    Err(IdentityError::Unavailable) => Err(IdentityError::Unavailable),
+                    _ => Ok(GithubCallback::Complete(display.locale)),
+                };
+            }
+        };
         let (cookie, csrf) = match (self.crypto.token(), self.crypto.token()) {
             (Ok(cookie), Ok(csrf)) => (cookie, csrf),
             _ => {
@@ -407,7 +429,9 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
                 .crypto
                 .protect("github_csrf", &[id.as_bytes(), csrf.expose().as_bytes()]),
         };
-        let display = self.flows.complete_callback(&id, Some(proof), now)?;
+        let display =
+            self.flows
+                .complete_callback(&id, Some(GithubApproval { identity, proof }), now)?;
         Ok(GithubCallback::Approval(BrowserApproval {
             flow_id: id,
             display,
@@ -466,9 +490,12 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
             now,
         )? {
             GithubPoll::Pending => Ok(GithubExchange::Pending),
-            GithubPoll::Approved => {
-                let (token, issue) = self.session_issue(AuthMethod::Github, now)?;
-                let session = self.store.create_session(issue, now).await?;
+            GithubPoll::Approved(identity) => {
+                let (token, issue) = self.session_seed(now)?;
+                let session = self
+                    .store
+                    .create_github_session(identity, issue, now)
+                    .await?;
                 Ok(GithubExchange::Session(IssuedSession { token, session }))
             }
         }
@@ -487,7 +514,9 @@ impl<S: IdentityStore, C: IdentityCrypto, E: EmailDelivery, G: GithubIdentity, F
         }
         let binding = self.crypto.protect("session", &[token.as_bytes()]);
         let session = self.store.session(binding, now).await?;
-        if session.owner != self.owner || !session.active(now) {
+        // Storage is the authority for current membership and the exact retained
+        // session. A process-wide bootstrap owner cannot represent invited users.
+        if !session.active(now) {
             return Err(IdentityError::Denied);
         }
         Ok(AuthenticatedSession { session, binding })

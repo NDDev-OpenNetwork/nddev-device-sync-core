@@ -288,10 +288,22 @@ enum GithubStage {
     Denied,
     Consumed,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedGithubIdentity {
+    pub provider_id: u64,
+    pub owner: Owner,
+}
+
+#[derive(Clone, Debug)]
+pub struct GithubApproval {
+    pub identity: VerifiedGithubIdentity,
+    pub proof: BrowserProof,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GithubPoll {
     Pending,
-    Approved,
+    Approved(VerifiedGithubIdentity),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -309,7 +321,8 @@ pub struct GithubFlow {
     pub locale: Locale,
     verifier: Option<SecretText>,
     verification_code: SecretText,
-    approval: Option<BrowserProof>,
+    approval: Option<GithubApproval>,
+    approved_identity: Option<VerifiedGithubIdentity>,
     stage: GithubStage,
     next_poll_at_ms: u64,
 }
@@ -334,6 +347,7 @@ impl GithubFlow {
             verification_code,
             locale,
             approval: None,
+            approved_identity: None,
             stage: GithubStage::Pending,
             next_poll_at_ms: now,
         })
@@ -348,19 +362,26 @@ impl GithubFlow {
     }
     pub fn complete_callback(
         &mut self,
-        proof: Option<BrowserProof>,
+        approval: Option<GithubApproval>,
         now: u64,
     ) -> Result<(), IdentityError> {
         self.check_expiry(now)?;
         if self.stage != GithubStage::Verifying {
             return Err(IdentityError::Denied);
         }
-        self.stage = if proof.is_some() {
+        if approval
+            .as_ref()
+            .is_some_and(|value| value.identity.provider_id == 0)
+        {
+            self.stage = GithubStage::Denied;
+            return Err(IdentityError::InvalidInput);
+        }
+        self.stage = if approval.is_some() {
             GithubStage::AwaitingApproval
         } else {
             GithubStage::Denied
         };
-        self.approval = proof;
+        self.approval = approval;
         Ok(())
     }
     fn check_expiry(&mut self, now: u64) -> Result<(), IdentityError> {
@@ -368,6 +389,7 @@ impl GithubFlow {
             self.stage = GithubStage::Denied;
             self.verifier = None;
             self.approval = None;
+            self.approved_identity = None;
         }
         if self.stage == GithubStage::Denied {
             Err(IdentityError::Denied)
@@ -379,7 +401,7 @@ impl GithubFlow {
         self.verification_code.expose()
     }
     pub fn browser_proof(&self) -> Option<BrowserProof> {
-        self.approval
+        self.approval.as_ref().map(|approval| approval.proof)
     }
     pub fn approve(
         &mut self,
@@ -391,7 +413,8 @@ impl GithubFlow {
         if !proof_matches || self.stage != GithubStage::AwaitingApproval {
             return Err(IdentityError::Denied);
         }
-        self.approval = None;
+        let approval = self.approval.take().ok_or(IdentityError::Denied)?;
+        self.approved_identity = permit.then_some(approval.identity);
         self.stage = if permit {
             GithubStage::Approved
         } else {
@@ -416,7 +439,10 @@ impl GithubFlow {
             }
             GithubStage::Approved => {
                 self.stage = GithubStage::Consumed;
-                Ok(GithubPoll::Approved)
+                self.approved_identity
+                    .take()
+                    .map(GithubPoll::Approved)
+                    .ok_or(IdentityError::Denied)
             }
             GithubStage::Denied | GithubStage::Consumed => Err(IdentityError::Denied),
         }
@@ -426,6 +452,15 @@ impl GithubFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn github_identity() -> VerifiedGithubIdentity {
+        VerifiedGithubIdentity {
+            provider_id: 42,
+            owner: Owner {
+                user_id: UserId::new("verified-user").unwrap(),
+                tenant_id: TenantId::new("company").unwrap(),
+            },
+        }
+    }
     #[test]
     fn recent_authentication_is_distinct_from_session_validity() {
         let issued = 1_000_000;
@@ -576,7 +611,27 @@ mod tests {
             cookie: ProtectedDigest([3; 32]),
             csrf: ProtectedDigest([4; 32]),
         };
-        flow.complete_callback(Some(proof), 102).unwrap();
+        flow.complete_callback(
+            Some(GithubApproval {
+                proof,
+                identity: github_identity(),
+            }),
+            102,
+        )
+        .unwrap();
+        let mut another = github_identity();
+        another.provider_id = 43;
+        another.owner.user_id = UserId::new("other-user").unwrap();
+        assert!(
+            flow.complete_callback(
+                Some(GithubApproval {
+                    proof,
+                    identity: another
+                }),
+                103
+            )
+            .is_err()
+        );
         assert_eq!(flow.poll(true, 102), Err(IdentityError::RateLimited));
         assert_eq!(
             flow.poll(true, 101 + GITHUB_POLL_MS),
@@ -584,10 +639,11 @@ mod tests {
         );
         assert!(flow.approve(false, true, 102 + GITHUB_POLL_MS).is_err());
         flow.approve(true, true, 102 + GITHUB_POLL_MS).unwrap();
+        assert!(flow.browser_proof().is_none());
         assert!(flow.approve(true, true, 103 + GITHUB_POLL_MS).is_err());
         assert_eq!(
             flow.poll(true, 101 + 2 * GITHUB_POLL_MS),
-            Ok(GithubPoll::Approved)
+            Ok(GithubPoll::Approved(github_identity()))
         );
         assert!(flow.poll(true, 101 + 3 * GITHUB_POLL_MS).is_err());
     }
@@ -607,9 +663,12 @@ mod tests {
             if deny {
                 flow.claim_callback(101).unwrap();
                 flow.complete_callback(
-                    Some(BrowserProof {
-                        cookie: ProtectedDigest([3; 32]),
-                        csrf: ProtectedDigest([4; 32]),
+                    Some(GithubApproval {
+                        identity: github_identity(),
+                        proof: BrowserProof {
+                            cookie: ProtectedDigest([3; 32]),
+                            csrf: ProtectedDigest([4; 32]),
+                        },
                     }),
                     102,
                 )
@@ -622,6 +681,41 @@ mod tests {
             assert!(flow.poll(true, 101).is_err());
             assert!(flow.approve(true, true, 101).is_err());
         }
+    }
+    #[test]
+    fn an_invalid_callback_identity_cannot_reopen_the_claimed_flow() {
+        let mut flow = GithubFlow::new(
+            "flow".into(),
+            ProtectedDigest([1; 32]),
+            ProtectedDigest([2; 32]),
+            SecretText::new("ephemeral".into()),
+            SecretText::new("12345678".into()),
+            Locale::En,
+            100,
+        )
+        .unwrap();
+        flow.claim_callback(101).unwrap();
+        let proof = BrowserProof {
+            cookie: ProtectedDigest([3; 32]),
+            csrf: ProtectedDigest([4; 32]),
+        };
+        let mut identity = github_identity();
+        identity.provider_id = 0;
+        assert_eq!(
+            flow.complete_callback(Some(GithubApproval { proof, identity }), 102),
+            Err(IdentityError::InvalidInput)
+        );
+        assert!(
+            flow.complete_callback(
+                Some(GithubApproval {
+                    proof,
+                    identity: github_identity()
+                }),
+                103
+            )
+            .is_err()
+        );
+        assert_eq!(flow.poll(true, 104), Err(IdentityError::Denied));
     }
     #[test]
     fn email_normalization_and_rate_window_are_explicit() {
