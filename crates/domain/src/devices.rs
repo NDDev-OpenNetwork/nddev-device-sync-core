@@ -8,6 +8,12 @@ pub const ENROLLMENT_LIFETIME_MS: u64 = 300_000;
 pub const ENROLLMENT_ATTEMPTS: u8 = 5;
 pub const MAX_PENDING_ENROLLMENTS: usize = 8;
 pub const MAX_ACTIVE_DEVICES: usize = 32;
+/// Authenticated onboarding has its own per-owner budget, independent of the
+/// unauthenticated sign-in source limit. Admit a full fleet without a quota reset.
+pub const ENROLLMENT_RATE: crate::identity::RatePolicy = crate::identity::RatePolicy {
+    limit: 32,
+    window_ms: 3_600_000,
+};
 // Revoked identities are retained, never silently forgotten or reassigned.
 pub const MAX_DEVICE_IDENTITIES: usize = 128;
 pub const MAX_DEVICE_PAGE: usize = 100;
@@ -153,6 +159,29 @@ mod tests {
         TenantId, UserId,
         identity::{AuthMethod, ProtectedDigest, Session},
     };
+    #[test]
+    fn a_full_fleet_fits_one_owner_window_without_removing_its_bound() {
+        let mut window = crate::identity::RateWindow::default();
+        // Four onboarding batches of eight, without modifying time or the window.
+        for batch in 0..4 {
+            for _ in 0..8 {
+                assert!(window.admit(1000 + batch, ENROLLMENT_RATE).is_ok());
+            }
+        }
+        assert_eq!(
+            window.admit(1004, ENROLLMENT_RATE),
+            Err(crate::identity::IdentityError::RateLimited)
+        );
+        assert_eq!(
+            window.admit(1000 + ENROLLMENT_RATE.window_ms - 1, ENROLLMENT_RATE),
+            Err(crate::identity::IdentityError::RateLimited)
+        );
+        assert!(
+            window
+                .admit(1000 + ENROLLMENT_RATE.window_ms, ENROLLMENT_RATE)
+                .is_ok()
+        );
+    }
     fn challenge(now: u64) -> EnrollmentChallenge {
         let owner = Owner {
             user_id: UserId::new("owner").unwrap(),
