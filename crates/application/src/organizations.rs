@@ -28,7 +28,7 @@ pub fn authorize(
     now: u64,
     administrative: bool,
 ) -> Result<(), OrganizationError> {
-    active(&context.auth, &context.signed, now).map_err(|_| OrganizationError::Denied)?;
+    active(&context.auth, &context.signed, now).map_err(OrganizationError::Authorization)?;
     let owner = &context.auth.session.owner;
     if administrative {
         member.authorize_administration(owner, &owner.tenant_id)?;

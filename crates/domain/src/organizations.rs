@@ -85,6 +85,8 @@ pub struct Membership {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OrganizationError {
+    #[error(transparent)]
+    Authorization(#[from] crate::sync::SyncError),
     #[error("company_input_invalid")]
     InvalidInput,
     #[error("company_revision_conflict")]
